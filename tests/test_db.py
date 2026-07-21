@@ -3,17 +3,24 @@
 Uses an in-memory SQLite database for isolation and speed.
 """
 
+import csv
+import os
+import tempfile
+
 import pytest
 from sqlalchemy.orm import Session
 
 from pcis.core import heat_moisture_balance as hmb
 from pcis.core import recommendation_engine as re
 from pcis.db.session import (
+    RECOMMENDATION_LOG_CSV_COLUMNS,
     compute_error_metrics,
+    export_recommendation_logs_csv,
     fit_and_save_calibration,
     get_calibration,
     get_house_by_name,
     get_measurements,
+    get_or_create_house_config,
     house_surfaces_as_domain_objects,
     init_db,
     latest_flock_record,
@@ -252,3 +259,194 @@ def test_get_calibration_none_when_not_fitted(session):
     house = save_house_config(session, "House 13", length_m=100.0, width_m=12.0, height_m=2.5, surfaces=SURFACES)
     session.commit()
     assert get_calibration(session, house, "indoor_t_c") is None
+
+
+# ---------------------------------------------------------------------------
+# ML data-logging: age_days + comfort-assessment fields, CSV export
+# ---------------------------------------------------------------------------
+
+
+def test_save_recommendation_persists_age_and_comfort_fields(session):
+    house = save_house_config(session, "House 14", length_m=150.0, width_m=15.0, height_m=3.0, surfaces=SURFACES)
+    session.commit()
+
+    result = re.recommend(
+        bird_count=20000,
+        body_weight_kg=2.5,
+        indoor_t_c=29.0,
+        indoor_rh_pct=60.0,
+        outdoor_t_c=38.0,
+        outdoor_rh_pct=30.0,
+        envelope_surfaces=SURFACES,
+        fan=FAN_CATALOG[1],
+        design_static_pressure_pa=30.0,
+        delta_t_c=3.0,
+        cooling_pad=CELDEK_7090_15_150MM,
+    )
+    save_recommendation(
+        session, house,
+        bird_count=20000, body_weight_kg=2.5,
+        indoor_t_c=29.0, indoor_rh_pct=60.0,
+        outdoor_t_c=38.0, outdoor_rh_pct=30.0,
+        recommendation=result,
+        age_days=28,
+    )
+    session.commit()
+
+    log = recommendation_history(session, house)[0]
+    assert log.age_days == 28
+    assert log.supply_air_t_c == pytest.approx(result.supply_air_t_c)
+    assert log.supply_air_rh_pct == pytest.approx(result.supply_air_rh_pct)
+    assert log.target_unreachable == result.target_unreachable
+    assert log.target_temp_c == pytest.approx(result.comfort.target_temp_c)
+    assert log.deviation_c == pytest.approx(result.comfort.deviation_c)
+    assert log.thi == pytest.approx(result.comfort.thi)
+    assert log.thi_class == result.comfort.thi_class
+    assert log.comfort_index == pytest.approx(result.comfort.comfort_index)
+    assert log.target_temp_rh_clamped == result.comfort.target_temp_rh_clamped
+
+
+def test_save_recommendation_age_days_defaults_to_none(session):
+    house = save_house_config(session, "House 15", length_m=100.0, width_m=12.0, height_m=2.5, surfaces=SURFACES)
+    session.commit()
+
+    result = re.recommend(
+        bird_count=20000, body_weight_kg=2.5,
+        indoor_t_c=24.0, indoor_rh_pct=60.0,
+        outdoor_t_c=20.0, outdoor_rh_pct=55.0,
+        envelope_surfaces=SURFACES,
+        fan=FAN_CATALOG[1], design_static_pressure_pa=30.0, delta_t_c=3.0,
+        cooling_pad=CELDEK_7090_15_150MM,
+    )
+    save_recommendation(
+        session, house,
+        bird_count=20000, body_weight_kg=2.5,
+        indoor_t_c=24.0, indoor_rh_pct=60.0,
+        outdoor_t_c=20.0, outdoor_rh_pct=55.0,
+        recommendation=result,
+    )
+    session.commit()
+
+    log = recommendation_history(session, house)[0]
+    assert log.age_days is None
+
+
+def test_export_recommendation_logs_csv_writes_correct_header_and_rows(session):
+    house = save_house_config(session, "House 16", length_m=150.0, width_m=15.0, height_m=3.0, surfaces=SURFACES)
+    session.commit()
+
+    scenarios = [
+        dict(age_days=7, body_weight_kg=0.18, indoor_t_c=33.0, indoor_rh_pct=60.0,
+             outdoor_t_c=30.0, outdoor_rh_pct=50.0),
+        dict(age_days=35, body_weight_kg=2.5, indoor_t_c=24.0, indoor_rh_pct=65.0,
+             outdoor_t_c=20.0, outdoor_rh_pct=55.0),
+    ]
+    for sc in scenarios:
+        result = re.recommend(
+            bird_count=20000,
+            body_weight_kg=sc["body_weight_kg"],
+            indoor_t_c=sc["indoor_t_c"],
+            indoor_rh_pct=sc["indoor_rh_pct"],
+            outdoor_t_c=sc["outdoor_t_c"],
+            outdoor_rh_pct=sc["outdoor_rh_pct"],
+            envelope_surfaces=SURFACES,
+            fan=FAN_CATALOG[1], design_static_pressure_pa=30.0, delta_t_c=3.0,
+            cooling_pad=CELDEK_7090_15_150MM,
+        )
+        save_recommendation(
+            session, house,
+            bird_count=20000, body_weight_kg=sc["body_weight_kg"],
+            indoor_t_c=sc["indoor_t_c"], indoor_rh_pct=sc["indoor_rh_pct"],
+            outdoor_t_c=sc["outdoor_t_c"], outdoor_rh_pct=sc["outdoor_rh_pct"],
+            recommendation=result,
+            age_days=sc["age_days"],
+        )
+    session.commit()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = os.path.join(tmp, "training_data.csv")
+        returned_path = export_recommendation_logs_csv(session, output_path=out_path)
+        assert returned_path == out_path
+        assert os.path.exists(out_path)
+
+        with open(out_path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+    assert rows[0] == RECOMMENDATION_LOG_CSV_COLUMNS
+    assert len(rows) == 3  # header + 2 data rows
+
+    age_idx = RECOMMENDATION_LOG_CSV_COLUMNS.index("age_days")
+    house_idx = RECOMMENDATION_LOG_CSV_COLUMNS.index("house_name")
+    bw_idx = RECOMMENDATION_LOG_CSV_COLUMNS.index("body_weight_kg")
+    ages = {row[age_idx] for row in rows[1:]}
+    assert ages == {"7", "35"}
+    assert all(row[house_idx] == "House 16" for row in rows[1:])
+    body_weights = {row[bw_idx] for row in rows[1:]}
+    assert body_weights == {"0.18", "2.5"}
+
+
+def test_export_recommendation_logs_csv_empty_when_no_logs(session):
+    house = save_house_config(session, "House 17", length_m=100.0, width_m=12.0, height_m=2.5, surfaces=SURFACES)
+    session.commit()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = os.path.join(tmp, "empty.csv")
+        export_recommendation_logs_csv(session, output_path=out_path, house=house)
+        with open(out_path, newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+    assert rows == [RECOMMENDATION_LOG_CSV_COLUMNS]
+
+
+# ---------------------------------------------------------------------------
+# get_or_create_house_config -- backs the GUI's automatic per-run logging
+# ---------------------------------------------------------------------------
+
+
+def test_get_or_create_house_config_creates_when_missing(session):
+    house = get_or_create_house_config(
+        session, "House 18", length_m=150.0, width_m=15.0, height_m=3.0, surfaces=SURFACES
+    )
+    session.commit()
+
+    fetched = get_house_by_name(session, "House 18")
+    assert fetched is not None
+    assert fetched.id == house.id
+    assert len(fetched.surfaces) == 2
+
+
+def test_get_or_create_house_config_reuses_existing_house_without_raising(session):
+    first = get_or_create_house_config(
+        session, "House 19", length_m=150.0, width_m=15.0, height_m=3.0, surfaces=SURFACES
+    )
+    session.commit()
+
+    # Calling again with the same name must NOT raise a uniqueness error --
+    # this is exactly the scenario a plain save_house_config would fail on
+    # (see test_house_config_name_must_be_unique above).
+    second = get_or_create_house_config(
+        session, "House 19", length_m=150.0, width_m=15.0, height_m=3.0, surfaces=SURFACES
+    )
+    session.commit()
+
+    assert second.id == first.id
+    assert get_house_by_name(session, "House 19") is not None
+
+
+def test_get_or_create_house_config_updates_dimensions_and_surfaces_on_reuse(session):
+    get_or_create_house_config(
+        session, "House 20", length_m=100.0, width_m=10.0, height_m=2.5, surfaces=SURFACES
+    )
+    session.commit()
+
+    new_surfaces = [hmb.Surface("sidewalls", u_value=0.5, area_m2=400.0)]
+    updated = get_or_create_house_config(
+        session, "House 20", length_m=200.0, width_m=20.0, height_m=4.0, surfaces=new_surfaces
+    )
+    session.commit()
+
+    assert updated.length_m == pytest.approx(200.0)
+    assert updated.width_m == pytest.approx(20.0)
+    assert updated.height_m == pytest.approx(4.0)
+    assert len(updated.surfaces) == 1
+    assert updated.surfaces[0].area_m2 == pytest.approx(400.0)

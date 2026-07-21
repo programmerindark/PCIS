@@ -1,14 +1,31 @@
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
-.coverage
-htmlcov/
+*.py[cod]
 *.egg-info/
 build/
 dist/
-.venv/
+.pytest_cache/
 venv/
+.venv/
+
+# PCIS runtime data -- the app writes this wherever it is launched from.
+# It contains your own logged recommendations; it is data, not source.
+pcis.db
 *.db
-*.sqlite3
+
+# Generated outputs
+*.csv
+pcis_training_data.csv
+sample_report.pdf
+
+# The web payload is BUILT from pcis/core + pcis/equipment by
+# tools/build_web_payload.py. It is committed deliberately (Vercel
+# serves it as a static asset and does not run Python at build time),
+# so it is NOT ignored -- but remember to regenerate it after changing
+# the engineering core, or the phone will run stale physics.
+
+# Editors / OS
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db

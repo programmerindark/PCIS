@@ -78,6 +78,15 @@ _AVIAGEN_MIN_VENT_TABLE = [
 #: Ambient temperature validity range for the table above, degrees C.
 AVIAGEN_MIN_VENT_VALID_TEMP_RANGE_C = (-1.0, 16.0)
 
+#: Body-weight bounds of the table above, kg. Exported (rather than
+#: left implicit inside the private table) so callers can check whether
+#: a weight is simulatable BEFORE calling and surface a meaningful
+#: message, instead of discovering it as a ValueError from deep inside
+#: `minimum_ventilation_rate_aviagen`. `pcis.core.digital_twin` uses
+#: these to derive its earliest simulatable bird age.
+AVIAGEN_MIN_VENT_MIN_WEIGHT_KG = _AVIAGEN_MIN_VENT_TABLE[0][0]
+AVIAGEN_MIN_VENT_MAX_WEIGHT_KG = _AVIAGEN_MIN_VENT_TABLE[-1][0]
+
 #: Air-quality thresholds that should never be exceeded [Aviagen2018].
 AVIAGEN_MAX_CO2_PPM = 3000.0
 AVIAGEN_MAX_CO_PPM = 10.0

@@ -48,11 +48,32 @@ def test_target_temperature_decreases_with_rh():
     assert high_rh < low_rh
 
 
-def test_target_temperature_rejects_out_of_range_rh():
+def test_target_temperature_clamps_high_rh_instead_of_crashing():
+    # Real farm humidity can exceed the table's 70% tested max (this
+    # was previously a hard crash -- see comfort_engine.py docstring
+    # note on RH above 70%). It should now clamp to the 70% column.
+    at_70 = ce.target_temperature(1.0, 70.0)
+    at_80 = ce.target_temperature(1.0, 80.0)
+    at_95 = ce.target_temperature(1.0, 95.0)
+    assert at_80 == pytest.approx(at_70)
+    assert at_95 == pytest.approx(at_70)
+    assert ce.target_temperature_rh_is_clamped(80.0) is True
+    assert ce.target_temperature_rh_is_clamped(70.0) is False
+
+
+def test_target_temperature_clamps_low_rh_instead_of_crashing():
+    at_40 = ce.target_temperature(1.0, 40.0)
+    at_30 = ce.target_temperature(1.0, 30.0)
+    assert at_30 == pytest.approx(at_40)
+    assert ce.target_temperature_rh_is_clamped(30.0) is True
+    assert ce.target_temperature_rh_is_clamped(40.0) is False
+
+
+def test_target_temperature_still_rejects_physically_invalid_rh():
     with pytest.raises(ValueError):
-        ce.target_temperature(1.0, 30.0)
+        ce.target_temperature(1.0, -5.0)
     with pytest.raises(ValueError):
-        ce.target_temperature(1.0, 80.0)
+        ce.target_temperature(1.0, 101.0)
 
 
 def test_target_temperature_rejects_below_min_weight():
@@ -137,3 +158,15 @@ def test_bird_comfort_index_within_tolerance_no_penalty():
         body_weight_kg=bw,
     )
     assert result.comfort_index == pytest.approx(100.0)
+
+
+def test_bird_comfort_index_flags_rh_clamping():
+    bw = 1.015
+    result_normal = ce.bird_comfort_index(t_c=25.0, t_wb_c=20.0, rh_pct=60.0, body_weight_kg=bw)
+    assert result_normal.target_temp_rh_clamped is False
+
+    result_high_rh = ce.bird_comfort_index(t_c=25.0, t_wb_c=23.0, rh_pct=85.0, body_weight_kg=bw)
+    assert result_high_rh.target_temp_rh_clamped is True
+    # THI is still computed normally (no table restriction) even when
+    # the target-temperature component is clamped.
+    assert result_high_rh.thi == pytest.approx(ce.thi_tao_xin(25.0, 23.0))

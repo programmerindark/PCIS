@@ -13,9 +13,13 @@ FlockRecord
     `breed` field is informational only right now -- see note below.
 RecommendationLog
     A saved snapshot of one `recommendation_engine.recommend()` call:
-    the inputs, the outputs, and the full explanation text, so past
-    recommendations can be reviewed or used for Stage 3 validation
-    (comparing recommended vs. actually-observed conditions).
+    the inputs, the outputs, the full explanation text, AND the
+    comfort-assessment breakdown (target temp, deviation, THI,
+    composite index), so past recommendations can be reviewed, used
+    for Stage 3 validation (comparing recommended vs. actually-
+    observed conditions), or exported as a training dataset (see
+    `pcis.db.session.export_recommendation_logs_csv`). `age_days` is
+    optional (nullable) since not every caller supplies it.
 MeasurementRecord
     One predicted-vs-measured pair for a named variable (e.g.
     "indoor_t_c", "static_pressure_pa", "airflow_m3_per_h",
@@ -123,6 +127,7 @@ class RecommendationLog(Base):
     timestamp: Mapped[dt.datetime] = mapped_column(default=dt.datetime.utcnow)
 
     # Inputs snapshot
+    age_days: Mapped[int | None] = mapped_column(default=None)  # bird age at this snapshot, if known
     bird_count: Mapped[int]
     body_weight_kg: Mapped[float]
     indoor_t_c: Mapped[float]
@@ -137,6 +142,26 @@ class RecommendationLog(Base):
     governing_constraint: Mapped[str] = mapped_column(String(50))
     confidence_score: Mapped[float]
     explanation: Mapped[str] = mapped_column(Text)  # newline-joined explanation lines
+
+    # Comfort-assessment breakdown (pcis.core.comfort_engine.ComfortAssessment),
+    # persisted so this row is a self-contained, ML-ready training example --
+    # not just the fan/pad decision but the derived comfort features behind it.
+    target_temp_c: Mapped[float | None] = mapped_column(default=None)
+    deviation_c: Mapped[float | None] = mapped_column(default=None)
+    thi: Mapped[float | None] = mapped_column(default=None)
+    thi_class: Mapped[str | None] = mapped_column(String(30), default=None)
+    comfort_index: Mapped[float | None] = mapped_column(default=None)
+    target_temp_rh_clamped: Mapped[bool | None] = mapped_column(default=None)
+
+    # Supply-air state and whether the target was physically achievable
+    # at this snapshot. Worth persisting for the ML dataset specifically
+    # because `fans_on` means something different when
+    # `target_unreachable` is true (it is "run what you have", not "this
+    # achieves target") -- a model trained on fan counts without this
+    # column would be learning from mislabelled examples.
+    supply_air_t_c: Mapped[float | None] = mapped_column(default=None)
+    supply_air_rh_pct: Mapped[float | None] = mapped_column(default=None)
+    target_unreachable: Mapped[bool | None] = mapped_column(default=None)
 
     house: Mapped["HouseConfig"] = relationship(back_populates="recommendations")
 

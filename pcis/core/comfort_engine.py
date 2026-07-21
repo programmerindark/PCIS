@@ -42,6 +42,43 @@ References
     citation. Treat these specific band edges as indicative, not as
     strongly validated as the Aviagen/Tao-and-Xin numbers above.
 
+A note on relative humidity above 70% (or below 40%)
+------------------------------------------------------
+The [AviagenPocketGuide] target-temperature table is only tabulated
+for RH 40-70%. Real broiler houses do go above that (farm operators
+report indoor RH reaching 80% in humid weather), and refusing to
+produce a number there previously made `target_temperature` crash the
+whole recommendation. I searched for a wider-range Aviagen or
+Mitchell-model source (the underlying "theoretical model" behind the
+table is described in Zahoor, Mitchell et al. 2015, British Poultry
+Science 57(1):134-141, but that paper's full method text was not
+extractable in this session) and did not find one that publishes a
+target temperature for RH>70% or RH<40%. Rather than crash, this
+module now clamps the RH used for the table lookup to
+[AVIAGEN_TARGET_TEMP_RH_MIN, AVIAGEN_TARGET_TEMP_RH_MAX] and sets
+`ComfortAssessment.target_temp_rh_clamped = True` whenever the real
+input RH fell outside that band, so callers can flag it rather than
+silently trust the number.
+
+Two things make this a defensible, non-dangerous fallback rather than
+a guess dressed up as data:
+1. Clamping high RH (e.g. 80%) down to the 70% column UNDERSTATES how
+   much cooling is really needed (higher humidity impairs evaporative
+   heat loss, so the true target temperature at 80% RH is lower than
+   at 70%) -- so this is flagged, not treated as precise.
+2. The THI metrics (`thi_tao_xin`, `thi_marai`) used alongside the
+   target-temperature deviation in `bird_comfort_index` are NOT
+   table-limited -- they are closed-form formulas valid at any RH, and
+   `bird_comfort_index` already takes the *minimum* of the two
+   sub-scores ("weakest dimension governs"). So even when the
+   temperature-deviation sub-score is optimistic due to clamping, a
+   genuinely dangerous high-RH/high-heat condition still gets caught
+   by the (unrestricted) THI sub-score dragging the composite index
+   down. Clamping the table lookup does not disable the app's ability
+   to detect high-humidity heat stress -- it only means the specific
+   "target temperature" number shown is a flagged floor, not a
+   validated figure.
+
 A note on the "Bird Comfort Index"
 -----------------------------------
 The composite `bird_comfort_index` function in this module combines
@@ -85,6 +122,21 @@ _AVIAGEN_TARGET_TEMP_TABLE: list[tuple[float, dict[int, float]]] = [
 
 _AVIAGEN_TARGET_TEMP_RH_COLUMNS = (40, 50, 60, 70)
 
+#: Public tested-range bounds for the RH columns above, so callers
+#: (e.g. `recommendation_engine.recommend`, the GUI) can check whether
+#: a given RH will be clamped before/after calling `target_temperature`
+#: and flag it accordingly -- see the module docstring note on RH
+#: above 70% / below 40%.
+AVIAGEN_TARGET_TEMP_RH_MIN = float(_AVIAGEN_TARGET_TEMP_RH_COLUMNS[0])
+AVIAGEN_TARGET_TEMP_RH_MAX = float(_AVIAGEN_TARGET_TEMP_RH_COLUMNS[-1])
+
+
+def target_temperature_rh_is_clamped(rh_pct: float) -> bool:
+    """True if `rh_pct` falls outside the Aviagen table's tested RH
+    range [40, 70] and would be clamped by `target_temperature`.
+    """
+    return rh_pct < AVIAGEN_TARGET_TEMP_RH_MIN or rh_pct > AVIAGEN_TARGET_TEMP_RH_MAX
+
 #: Air-quality thresholds [AviagenPocketGuide]
 AVIAGEN_CO2_IDEAL_MAX_PPM = 3000.0
 AVIAGEN_CO2_ASCITES_RISK_PPM = 3500.0
@@ -110,22 +162,23 @@ def target_temperature(body_weight_kg: float, rh_pct: float) -> float:
         raises -- extrapolating below day-old chick weight is not
         supported.
     rh_pct : float
-        Relative humidity, percent. Must be within [40, 70] -- the
-        table's tested range; this function refuses to extrapolate
-        beyond it.
+        Relative humidity, percent, 0-100. Values outside the table's
+        tested range [40, 70] are CLAMPED to the nearest edge (40 or
+        70) rather than raising -- see the module docstring note on
+        RH above 70% / below 40% for why this is flagged rather than
+        silently trusted. Use `target_temperature_rh_is_clamped` to
+        check whether a given call will be clamped, and
+        `bird_comfort_index`'s `target_temp_rh_clamped` field for the
+        same signal on a full comfort assessment.
 
     Returns
     -------
     float
         Target dry-bulb temperature, degrees Celsius.
     """
-    if rh_pct < _AVIAGEN_TARGET_TEMP_RH_COLUMNS[0] or rh_pct > _AVIAGEN_TARGET_TEMP_RH_COLUMNS[-1]:
-        raise ValueError(
-            f"rh_pct={rh_pct} is outside the Aviagen table's tested "
-            f"range {_AVIAGEN_TARGET_TEMP_RH_COLUMNS[0]}-"
-            f"{_AVIAGEN_TARGET_TEMP_RH_COLUMNS[-1]}%; refusing to "
-            "extrapolate"
-        )
+    if rh_pct < 0.0 or rh_pct > 100.0:
+        raise ValueError(f"rh_pct={rh_pct} is not a valid relative humidity (must be 0-100)")
+    rh_pct = max(AVIAGEN_TARGET_TEMP_RH_MIN, min(AVIAGEN_TARGET_TEMP_RH_MAX, rh_pct))
     min_weight = _AVIAGEN_TARGET_TEMP_TABLE[0][0]
     if body_weight_kg < min_weight:
         raise ValueError(
@@ -275,6 +328,13 @@ class ComfortAssessment:
     comfort_index : float
         Composite 0-100 score. See module docstring: this is a PCIS
         synthesis, not a validated published index.
+    target_temp_rh_clamped : bool
+        True if `rh_pct` fell outside the Aviagen table's tested [40,
+        70] range, meaning `target_temp_c`/`deviation_c` were computed
+        against a clamped RH rather than the real value -- see the
+        module docstring note on RH above 70% / below 40%. The THI
+        component (`thi`, `thi_class`) is NOT affected by this, since
+        those formulas have no table range restriction.
     """
 
     t_c: float
@@ -285,6 +345,7 @@ class ComfortAssessment:
     thi: float
     thi_class: str
     comfort_index: float
+    target_temp_rh_clamped: bool = False
 
 
 def bird_comfort_index(
@@ -347,4 +408,5 @@ def bird_comfort_index(
         thi=thi,
         thi_class=thi_class,
         comfort_index=composite,
+        target_temp_rh_clamped=target_temperature_rh_is_clamped(rh_pct),
     )

@@ -79,13 +79,203 @@ way `fan_curve.py` interpolates across its full manufacturer curve.
 obtain the actual chart data (image or export) later, replacing the
 single design-point assumption with a real interpolated curve is a
 drop-in change.
+
+UPDATE (2026-07-21): the curve has been obtained and digitized
+--------------------------------------------------------------
+The manufacturer product sheet [MuntersPS7090] was supplied and its
+"Saturation efficiency CELdek 7090-15" chart read off at its labelled
+gridlines. See `MUNTERS_CELDEK_7090_SATURATION_EFFICIENCY_PCT` below
+for the values and `saturation_efficiency_at_velocity()` to use them.
+These are chart-digitized, not published numbers, and carry a stated
++/-3 percentage point reading tolerance.
+
+Doing so surfaced a substantive disagreement that matters more than
+the curve itself: **the manufacturer curve and the extension design
+guidance differ by 15-20 percentage points** at the same pad depth and
+velocity (Munters ~90% vs MSU/UGA 70-75% for 150mm @ 1.78 m/s). This
+is the standard laboratory-vs-field-derated gap. PCIS has deliberately
+NOT switched its default to the manufacturer figure -- doing so would
+quietly make every cooling recommendation more optimistic, predicting
+fewer fans than needed, on the strength of new-pad lab conditions. See
+`MANUFACTURER_VS_EXTENSION_EFFICIENCY_NOTE` for the full reasoning.
+
+What remains genuinely missing: a *measured* efficiency from a real
+house, which is the only thing that can settle which figure applies to
+your equipment. `pcis.core.validation` exists for exactly this -- log
+predicted-vs-measured supply air temperature and fit a calibration.
+
+References added in this pass
+-----------------------------
+[MuntersPS7090]  Munters AB, "CELdek 7090-15 Evaporative Cooling Pad"
+    product sheet (HC/MMA/EqGB-1782-02/11). Source of the confirmed
+    chart axes/curve families described above.
+    https://munters.sies.si/images/pdf/celdek7090.pdf
+    Retrieved 2026-07-21.
 """
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from pcis.core import psychrometrics as psy
+
+# ---------------------------------------------------------------------------
+# Manufacturer saturation-efficiency curve (chart-digitized)
+# ---------------------------------------------------------------------------
+
+#: Reading tolerance on the digitized curve below, in percentage
+#: points. The source is a printed chart, not a table, so these values
+#: carry a visual reading error that a published table would not.
+#: Quoted explicitly rather than buried, and returned to callers via
+#: `saturation_efficiency_reading_tolerance_pct`.
+MUNTERS_CURVE_READING_TOLERANCE_PCT = 3.0
+
+#: Munters CELdek 7090-15 saturation efficiency (%) vs air face
+#: velocity (m/s), per pad depth (mm), read off the "Saturation
+#: efficiency CELdek 7090-15" chart in the manufacturer product sheet
+#: [MuntersPS7090].
+#:
+#: PROVENANCE -- read this before using these numbers:
+#: These are CHART-DIGITIZED values, not published figures. Munters
+#: publishes this relationship only as a plotted curve; the values here
+#: were read off that plot at its labelled gridlines. They carry a
+#: reading error of about +/- MUNTERS_CURVE_READING_TOLERANCE_PCT
+#: percentage points, which is a real uncertainty a manufacturer table
+#: would not have. They are recorded at the labelled x-gridlines only
+#: (0.5, 1, 2, 3, 4, 5 m/s) rather than on a fabricated dense grid --
+#: interpolation between them is done at call time and is PCIS's, not
+#: Munters'.
+#:
+#: The chart's shaded "risk of droplet" field begins around 3.5-4 m/s
+#: depending on depth; see `MUNTERS_DROPLET_RISK_VELOCITY_MPS`.
+MUNTERS_CELDEK_7090_SATURATION_EFFICIENCY_PCT: dict[float, list[tuple[float, float]]] = {
+    300.0: [(0.5, 99.0), (1.0, 98.0), (2.0, 96.0), (3.0, 94.0), (4.0, 92.0), (5.0, 90.0)],
+    200.0: [(0.5, 98.0), (1.0, 96.0), (2.0, 92.0), (3.0, 89.0), (4.0, 86.0), (5.0, 84.0)],
+    150.0: [(0.5, 96.0), (1.0, 94.0), (2.0, 89.0), (3.0, 85.0), (4.0, 81.0), (5.0, 78.0)],
+    100.0: [(0.5, 94.0), (1.0, 90.0), (2.0, 83.0), (3.0, 77.0), (4.0, 72.0), (5.0, 68.0)],
+}
+
+#: Approximate face velocity above which the manufacturer chart shades
+#: the "risk of droplet" region (water carry-over past the pad).
+#: Read off the same chart; approximate by nature.
+MUNTERS_DROPLET_RISK_VELOCITY_MPS = 3.5
+
+#: THE IMPORTANT CAVEAT. The manufacturer curve above and the extension
+#: design guidance already in this module DISAGREE, substantially and
+#: consistently:
+#:
+#:     150mm pad @ 1.78 m/s -- Munters chart:      ~90%
+#:     150mm pad @ 1.78 m/s -- MSU/UGA Extension:  70-75%
+#:
+#: That is a 15-20 percentage point gap, and it is robust: even the
+#: *thinnest* pad on the Munters chart (100mm) reads ~84% at that
+#: velocity, still well above the extension figure. So this is not a
+#: chart-reading error.
+#:
+#: The gap is the well-known difference between laboratory performance
+#: (new pad, perfectly and uniformly wetted, no bypass air, no scaling,
+#: no aging) and field design guidance (which builds in derating for
+#: exactly those effects). Neither number is "wrong" -- they answer
+#: different questions.
+#:
+#: WHY THE DEFAULT DID NOT CHANGE: `CoolingPad.assumed_saturation_
+#: efficiency` still carries the conservative extension figure. Swapping
+#: it for the manufacturer curve would silently make every cooling
+#: recommendation in PCIS more optimistic -- predicting colder supply
+#: air, hence less required airflow, hence fewer fans -- on the strength
+#: of lab-condition data, for houses that are neither new nor perfectly
+#: maintained. That is the wrong direction to be wrong in when the
+#: consequence is under-ventilated birds in a heat wave. The curve is
+#: available via `saturation_efficiency_at_velocity` for callers who
+#: explicitly want manufacturer-ideal performance (e.g. "what is the
+#: best this equipment could possibly do?"), and the two figures should
+#: eventually be reconciled against measured performance from a real
+#: house using `pcis.core.validation`.
+MANUFACTURER_VS_EXTENSION_EFFICIENCY_NOTE = (
+    "Munters' published curve gives ~90% saturation efficiency for a 150mm pad at "
+    "the 1.78 m/s design velocity, while MSU and UGA Extension design guidance gives "
+    "70-75% at the same point -- a 15-20 percentage point gap between laboratory and "
+    "field-derated performance. PCIS defaults to the conservative extension figure, "
+    "because being optimistic about cooling capacity under-ventilates birds in a heat "
+    "wave. Use saturation_efficiency_at_velocity() only when you specifically want "
+    "manufacturer-ideal performance."
+)
+
+
+def saturation_efficiency_reading_tolerance_pct() -> float:
+    """Reading tolerance (percentage points) on the digitized curve."""
+    return MUNTERS_CURVE_READING_TOLERANCE_PCT
+
+
+def saturation_efficiency_at_velocity(depth_mm: float, velocity_mps: float) -> float:
+    """Manufacturer-chart saturation efficiency (as a 0-1 fraction) for
+    a CELdek 7090-15 pad of the given depth at the given face velocity.
+
+    Linear interpolation between the chart-digitized gridline points in
+    `MUNTERS_CELDEK_7090_SATURATION_EFFICIENCY_PCT`. Refuses to
+    extrapolate outside the chart's plotted range or to invent curves
+    for depths Munters does not plot -- consistent with the rest of
+    PCIS.
+
+    IMPORTANT: this returns LABORATORY performance and will typically
+    be 15-20 percentage points more optimistic than the extension-based
+    design figures PCIS uses by default. Read
+    `MANUFACTURER_VS_EXTENSION_EFFICIENCY_NOTE` before feeding this into
+    a sizing calculation.
+
+    Parameters
+    ----------
+    depth_mm : float
+        Pad depth. Must be one Munters plots: 100, 150, 200 or 300 mm.
+    velocity_mps : float
+        Air face velocity, within the chart's plotted range.
+
+    Returns
+    -------
+    float
+        Saturation efficiency as a fraction in (0, 1].
+
+    Raises
+    ------
+    ValueError
+        If the depth is not plotted, or the velocity is outside the
+        chart's range.
+    """
+    if depth_mm not in MUNTERS_CELDEK_7090_SATURATION_EFFICIENCY_PCT:
+        plotted = sorted(MUNTERS_CELDEK_7090_SATURATION_EFFICIENCY_PCT)
+        raise ValueError(
+            f"depth_mm={depth_mm} is not a depth Munters plots on this chart "
+            f"(plotted depths: {plotted} mm). PCIS will not interpolate a curve "
+            "for an unplotted depth."
+        )
+
+    points = MUNTERS_CELDEK_7090_SATURATION_EFFICIENCY_PCT[depth_mm]
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+
+    if velocity_mps < xs[0] or velocity_mps > xs[-1]:
+        raise ValueError(
+            f"velocity_mps={velocity_mps} is outside the plotted range of the "
+            f"Munters chart [{xs[0]}, {xs[-1]}] m/s; refusing to extrapolate "
+            "beyond published data"
+        )
+
+    i = bisect.bisect_left(xs, velocity_mps)
+    if xs[i] == velocity_mps:
+        return ys[i] / 100.0
+    x0, x1 = xs[i - 1], xs[i]
+    y0, y1 = ys[i - 1], ys[i]
+    return (y0 + (y1 - y0) * (velocity_mps - x0) / (x1 - x0)) / 100.0
+
+
+def exceeds_droplet_risk_velocity(velocity_mps: float) -> bool:
+    """Whether a face velocity falls in the manufacturer chart's shaded
+    "risk of droplet" region, where water can be carried past the pad
+    into the house. Approximate -- the boundary is a shaded field on a
+    chart, not a published threshold.
+    """
+    return velocity_mps >= MUNTERS_DROPLET_RISK_VELOCITY_MPS
 
 
 @dataclass(frozen=True)

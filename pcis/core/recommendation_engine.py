@@ -60,12 +60,30 @@ from pcis.equipment.fan_curve import FanCurve
 #: a literature value.
 PAD_ACTIVATION_MARGIN_C = 1.0
 
+#: Explanation attached whenever the target indoor temperature cannot
+#: be reached by ventilation at the current supply-air state. Kept as a
+#: named constant so the GUI, PDF report, digital twin, and CLI all
+#: state this identically rather than paraphrasing a safety-relevant
+#: caveat differently in four places.
+TARGET_UNREACHABLE_WARNING = (
+    "WARNING -- TARGET NOT REACHABLE: the air entering the house is at or above "
+    "the target indoor temperature, so no amount of ventilation can bring the "
+    "house to target. Ventilation moves indoor conditions toward the supply-air "
+    "state; it cannot cool below it. The fan count above is what the sensible-"
+    "heat equation returns for the assumed temperature rise -- read it as "
+    "'run what you have', NOT as a setting that will achieve target. Closing "
+    "this gap needs more evaporative cooling capacity, a lower supply-air "
+    "temperature, or accepting a higher indoor temperature. More fans will not "
+    "do it."
+)
+
 #: Confidence-score deductions. PCIS engineering judgment, not
 #: literature values -- see module docstring.
 CONFIDENCE_DEDUCTION_PAD_150MM_DESIGN_POINT = 15.0
 CONFIDENCE_DEDUCTION_PAD_100MM_DESIGN_POINT = 25.0
 CONFIDENCE_DEDUCTION_CO2_DEFAULT_OUTDOOR_PPM = 10.0
 CONFIDENCE_DEDUCTION_COMPOSITE_COMFORT_INDEX = 5.0
+CONFIDENCE_DEDUCTION_RH_OUTSIDE_TABLE_RANGE = 10.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +105,21 @@ class Recommendation:
     comfort : ComfortAssessment
         Full comfort breakdown at the current indoor conditions (see
         `pcis.core.comfort_engine`).
+    target_unreachable : bool
+        True when `supply_air_t_c` is at or above the comfort target
+        temperature, meaning ventilation physically cannot bring the
+        house to target regardless of fan count. When this is True,
+        `fans_on` should be read as "run what you have", not as a
+        setting that achieves target -- see `TARGET_UNREACHABLE_WARNING`,
+        which is also appended to `explanation`.
+
+        Deliberately NOT folded into `confidence_score`: the confidence
+        score means "how well-sourced are the numbers behind this",
+        and unreachability is not an uncertainty -- it is a physical
+        fact the model is entirely confident about. Deducting for it
+        would blur a well-defined meaning and would also, perversely,
+        make the app look *less* sure exactly when it is *most* sure
+        something is wrong. It gets its own flag instead.
     confidence_score : float
         0-100, see module docstring.
     explanation : list[str]
@@ -102,6 +135,7 @@ class Recommendation:
     supply_air_rh_pct: float
     comfort: ce.ComfortAssessment
     confidence_score: float
+    target_unreachable: bool = False
     explanation: list[str] = field(default_factory=list)
 
 
@@ -180,6 +214,19 @@ def recommend(
 
     # --- Decide whether pads are needed ---------------------------------
     target_temp = ce.target_temperature(body_weight_kg, indoor_rh_pct)
+    if ce.target_temperature_rh_is_clamped(indoor_rh_pct):
+        confidence -= CONFIDENCE_DEDUCTION_RH_OUTSIDE_TABLE_RANGE
+        explanation.append(
+            f"-{CONFIDENCE_DEDUCTION_RH_OUTSIDE_TABLE_RANGE:.0f} confidence: "
+            f"indoor RH ({indoor_rh_pct:.0f}%) is outside the Aviagen target-"
+            f"temperature table's tested range ({ce.AVIAGEN_TARGET_TEMP_RH_MIN:.0f}-"
+            f"{ce.AVIAGEN_TARGET_TEMP_RH_MAX:.0f}%). The target temperature below "
+            "was computed using the nearest tested RH as a floor, not the real "
+            "value -- at RH above 70% the true target is likely LOWER than shown "
+            "(more cooling needed), so treat pad/fan sizing here as a minimum, "
+            "and lean on the THI reading (unaffected by this limitation) as the "
+            "more trustworthy heat-stress signal at high humidity."
+        )
     pads_needed = (
         cooling_pad is not None and outdoor_t_c > target_temp + PAD_ACTIVATION_MARGIN_C
     )
@@ -215,6 +262,18 @@ def recommend(
         supply_t_c, supply_rh_pct = outdoor_t_c, outdoor_rh_pct
         reason = "no cooling pad supplied" if cooling_pad is None else "outdoor temp within comfort margin of target"
         explanation.append(f"Pads not recommended ({reason}).")
+
+    # --- Is the target physically achievable at all? ---------------------
+    # Checked here, after the supply-air state is settled (post-pad if
+    # pads are on), because that is the coldest air the house can
+    # possibly be fed. If even that is at/above target, no fan count
+    # reaches target and saying so is more useful than a number.
+    target_unreachable = supply_t_c >= target_temp
+    if target_unreachable:
+        explanation.append(
+            f"{TARGET_UNREACHABLE_WARNING} (supply air {supply_t_c:.1f}C vs "
+            f"target {target_temp:.1f}C -- a {supply_t_c - target_temp:.1f}C gap.)"
+        )
 
     # --- Governing airflow requirement ----------------------------------
     requirements: dict[str, float] = {}
@@ -283,5 +342,6 @@ def recommend(
         supply_air_rh_pct=supply_rh_pct,
         comfort=comfort,
         confidence_score=confidence,
+        target_unreachable=target_unreachable,
         explanation=explanation,
     )

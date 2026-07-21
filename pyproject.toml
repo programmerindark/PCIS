@@ -7,17 +7,31 @@ name = "pcis"
 version = "0.1.0.dev0"
 description = "Poultry Climate Intelligence System - engineering decision-support system for environmentally controlled broiler houses"
 requires-python = ">=3.10"
-dependencies = [
-    "numpy>=1.26",
-    "scipy>=1.11",
-    "SQLAlchemy>=2.0",
-    "reportlab>=4.0",
-]
+
+# INTENTIONALLY EMPTY. `pcis.core` and `pcis.equipment` -- the entire
+# engineering layer -- import nothing outside the standard library
+# (math, bisect, dataclasses). Keeping the base package dependency-free
+# is what lets the identical code run unmodified in a browser via
+# Pyodide/WebAssembly for the mobile build, with no dependency
+# resolution and no native wheels involved.
+#
+# numpy and scipy used to be declared here and were never imported by
+# any module; they are removed rather than left as dead weight, since
+# in a browser build scipy alone would have pulled ~30 MB for nothing.
+#
+# Everything heavier is an extra, grouped by which layer needs it:
+dependencies = []
+
+[project.scripts]
+pcis = "pcis.gui.main_window:main"
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.6"]
-charts = ["plotly>=5.20"]
-dev = ["pytest>=7.4", "pytest-cov>=4.1", "pypdf>=4.0"]
+db = ["SQLAlchemy>=2.0"]          # pcis.db -- persistence
+reports = ["reportlab>=4.0"]      # pcis.reports -- PDF generation
+gui = ["PySide6>=6.6"]            # pcis.gui -- desktop app
+# Everything needed to run the full desktop application:
+desktop = ["SQLAlchemy>=2.0", "reportlab>=4.0", "PySide6>=6.6"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "pypdf>=4.0", "build>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

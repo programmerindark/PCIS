@@ -92,6 +92,37 @@ def get_house_by_name(session: Session, name: str) -> HouseConfig | None:
     return session.execute(select(HouseConfig).where(HouseConfig.name == name)).scalar_one_or_none()
 
 
+def get_or_create_house_config(
+    session: Session,
+    name: str,
+    length_m: float,
+    width_m: float,
+    height_m: float,
+    surfaces: list[hmb.Surface],
+) -> HouseConfig:
+    """Fetch a house by name if it already exists, refreshing its
+    dimensions/envelope surfaces to the given values; otherwise create
+    it via `save_house_config`.
+
+    `HouseConfig.name` is unique, so a plain `save_house_config` call
+    raises on a second call with the same name. This helper exists for
+    call sites that record automatically on every action (e.g. the
+    GUI logging one row per recommendation run under the same house
+    name) and must not fail just because the house was already seen.
+    """
+    house = get_house_by_name(session, name)
+    if house is None:
+        return save_house_config(session, name, length_m, width_m, height_m, surfaces)
+    house.length_m = length_m
+    house.width_m = width_m
+    house.height_m = height_m
+    house.surfaces.clear()
+    for s in surfaces:
+        house.surfaces.append(EnvelopeSurface(name=s.name, u_value=s.u_value, area_m2=s.area_m2))
+    session.flush()
+    return house
+
+
 def house_surfaces_as_domain_objects(house: HouseConfig) -> list[hmb.Surface]:
     """Convert a persisted HouseConfig's surfaces back into the plain
     `heat_moisture_balance.Surface` objects the engineering core uses.
@@ -145,14 +176,26 @@ def save_recommendation(
     outdoor_t_c: float,
     outdoor_rh_pct: float,
     recommendation: Recommendation,
+    age_days: int | None = None,
 ) -> RecommendationLog:
     """Persist a full snapshot of a `recommendation_engine.recommend()`
-    call -- inputs and outputs both -- for later review or Stage 3
-    validation (comparing recommended settings to what was actually
-    run and observed).
+    call -- inputs, outputs, and the comfort-assessment breakdown --
+    for later review, Stage 3 validation (comparing recommended
+    settings to what was actually run and observed), or export as a
+    training dataset (`export_recommendation_logs_csv`).
+
+    Parameters
+    ----------
+    age_days : int, optional
+        Bird age at this snapshot, if known (e.g. from the GUI's
+        growth-curve-linked age field). Stored so a growing history of
+        these rows carries the one input (age/day) that the
+        `Recommendation` object itself doesn't retain, alongside the
+        timestamp SQLAlchemy already sets automatically.
     """
     log = RecommendationLog(
         house_id=house.id,
+        age_days=age_days,
         bird_count=bird_count,
         body_weight_kg=body_weight_kg,
         indoor_t_c=indoor_t_c,
@@ -165,6 +208,15 @@ def save_recommendation(
         governing_constraint=recommendation.governing_constraint,
         confidence_score=recommendation.confidence_score,
         explanation="\n".join(recommendation.explanation),
+        target_temp_c=recommendation.comfort.target_temp_c,
+        deviation_c=recommendation.comfort.deviation_c,
+        thi=recommendation.comfort.thi,
+        thi_class=recommendation.comfort.thi_class,
+        comfort_index=recommendation.comfort.comfort_index,
+        target_temp_rh_clamped=recommendation.comfort.target_temp_rh_clamped,
+        supply_air_t_c=recommendation.supply_air_t_c,
+        supply_air_rh_pct=recommendation.supply_air_rh_pct,
+        target_unreachable=recommendation.target_unreachable,
     )
     session.add(log)
     session.flush()
@@ -180,6 +232,94 @@ def recommendation_history(session: Session, house: HouseConfig, limit: int = 50
         .limit(limit)
     )
     return list(session.execute(stmt).scalars().all())
+
+
+#: Column order for `export_recommendation_logs_csv` -- one row per
+#: saved `RecommendationLog`, oldest first. Kept as an explicit list
+#: (rather than introspecting the ORM model) so the CSV schema is
+#: stable and documented in one place, independent of column-ordering
+#: changes to the model.
+RECOMMENDATION_LOG_CSV_COLUMNS = [
+    "id", "house_name", "timestamp", "age_days",
+    "bird_count", "body_weight_kg",
+    "indoor_t_c", "indoor_rh_pct", "outdoor_t_c", "outdoor_rh_pct",
+    "fans_on", "pads_on", "required_airflow_m3_per_h", "governing_constraint",
+    "confidence_score",
+    "target_temp_c", "deviation_c", "thi", "thi_class", "comfort_index",
+    "target_temp_rh_clamped",
+    "supply_air_t_c", "supply_air_rh_pct", "target_unreachable",
+]
+
+
+def export_recommendation_logs_csv(
+    session: Session,
+    output_path: str,
+    house: HouseConfig | None = None,
+) -> str:
+    """Export saved `RecommendationLog` rows to a CSV file, one row per
+    saved recommendation, oldest first -- a growing dataset intended
+    for future calibration/ML work (e.g. comparing predicted fan/pad
+    decisions and comfort scores against real outcomes once historical
+    data exists), not just a one-off report.
+
+    Every column is something PCIS already computed and cited
+    (`recommendation_engine.py`/`comfort_engine.py`) at the moment the
+    row was saved -- this function only serializes it, it does not
+    compute anything new.
+
+    Parameters
+    ----------
+    output_path : str
+        Destination CSV file path.
+    house : HouseConfig, optional
+        If given, export only that house's logs. If None, export every
+        saved recommendation across all houses (a `house_name` column
+        is included either way so the source house is always
+        identifiable).
+
+    Returns
+    -------
+    str
+        `output_path`, for chaining/confirmation.
+    """
+    import csv
+
+    stmt = select(RecommendationLog).order_by(RecommendationLog.timestamp.asc())
+    if house is not None:
+        stmt = stmt.where(RecommendationLog.house_id == house.id)
+    logs = list(session.execute(stmt).scalars().all())
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(RECOMMENDATION_LOG_CSV_COLUMNS)
+        for log in logs:
+            writer.writerow([
+                log.id,
+                log.house.name,
+                log.timestamp.isoformat(),
+                log.age_days,
+                log.bird_count,
+                log.body_weight_kg,
+                log.indoor_t_c,
+                log.indoor_rh_pct,
+                log.outdoor_t_c,
+                log.outdoor_rh_pct,
+                log.fans_on,
+                log.pads_on,
+                log.required_airflow_m3_per_h,
+                log.governing_constraint,
+                log.confidence_score,
+                log.target_temp_c,
+                log.deviation_c,
+                log.thi,
+                log.thi_class,
+                log.comfort_index,
+                log.target_temp_rh_clamped,
+                log.supply_air_t_c,
+                log.supply_air_rh_pct,
+                log.target_unreachable,
+            ])
+    return output_path
 
 
 # ---------------------------------------------------------------------------
