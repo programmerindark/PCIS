@@ -533,3 +533,67 @@ def test_export_can_exclude_test_rows(session, tmp_path):
     rows = list(_csv.reader(open(out, newline="", encoding="utf-8")))
     assert len(rows) == 2  # header + 1 real row
     assert "is_test" in rows[0] and "note" in rows[0]
+
+
+# ---------------------------------------------------------------------------
+# Schema migration: opening a database written by an older version
+#
+# create_all() makes missing tables but never alters an existing one, so a
+# db from before a column was added crashes the first query that references
+# it ("no such column: recommendation_logs.age_days"). init_db must top up
+# missing columns in place.
+# ---------------------------------------------------------------------------
+
+
+def test_old_schema_database_is_migrated_in_place(tmp_path):
+    import sqlite3
+
+    from pcis.db.session import all_recommendation_logs, count_recommendation_logs, init_db
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE house_configs (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+            length_m REAL, width_m REAL, height_m REAL, created_at TEXT);
+        CREATE TABLE recommendation_logs (
+            id INTEGER PRIMARY KEY, house_id INTEGER, timestamp TEXT,
+            bird_count INTEGER, body_weight_kg REAL, indoor_t_c REAL, indoor_rh_pct REAL,
+            outdoor_t_c REAL, outdoor_rh_pct REAL, fans_on INTEGER, pads_on INTEGER,
+            required_airflow_m3_per_h REAL, governing_constraint TEXT,
+            confidence_score REAL, explanation TEXT);
+        INSERT INTO house_configs VALUES (1,'Legacy',150,15,3,'2026-01-01');
+        INSERT INTO recommendation_logs
+            (id,house_id,timestamp,bird_count,body_weight_kg,indoor_t_c,indoor_rh_pct,
+             outdoor_t_c,outdoor_rh_pct,fans_on,pads_on,required_airflow_m3_per_h,
+             governing_constraint,confidence_score,explanation)
+            VALUES (1,1,'2026-01-01 08:00',20000,2.3,29,60,35,40,10,0,317000,
+                    'moisture',85,'legacy row');
+        """
+    )
+    con.commit()
+    con.close()
+
+    engine = init_db(str(db))  # must not raise; must add the missing columns
+
+    with Session(engine) as s:
+        logs = all_recommendation_logs(s)           # the query that crashed
+        assert len(logs) == 1
+        assert logs[0].governing_constraint == "moisture"   # legacy data intact
+        assert logs[0].age_days is None                     # new column, default
+        assert logs[0].is_test is False
+        assert count_recommendation_logs(s) == (1, 0)
+
+    con = sqlite3.connect(db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(recommendation_logs)")}
+    con.close()
+    assert {"age_days", "is_test", "note", "supply_air_t_c", "target_unreachable"} <= cols
+
+
+def test_migration_is_a_noop_on_a_current_database(tmp_path):
+    from pcis.db.session import _migrate_add_missing_columns, init_db
+
+    engine = init_db(str(tmp_path / "fresh.db"))
+    # A freshly created db already has every column, so a second migration
+    # pass must add nothing.
+    assert _migrate_add_missing_columns(engine) == []

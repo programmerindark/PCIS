@@ -51,6 +51,7 @@ from pcis.core import comfort_engine as ce
 from pcis.core import heat_moisture_balance as hmb
 from pcis.core import psychrometrics as psy
 from pcis.core import ventilation_solver as vs
+from pcis.core import wind_chill as wc
 from pcis.equipment.cooling_pad import CoolingPad, leaving_air_state
 from pcis.equipment.fan_curve import FanCurve
 
@@ -122,6 +123,40 @@ class Recommendation:
         something is wrong. It gets its own flag instead.
     confidence_score : float
         0-100, see module docstring.
+    delivered_airflow_m3_per_h : float | None
+        What the recommended fans actually move (fans_on x per-fan
+        airflow at the design static pressure). This is >= the required
+        airflow, because fan count is rounded up -- so it, not the
+        requirement, is what the birds actually experience.
+    cross_section_area_m2 : float | None
+        The tunnel end-profile the air passes through (house width x
+        height). Only set when the caller supplies house geometry.
+    effective_temp_c : float | None
+        Estimated temperature the (fully-feathered) birds FEEL at the
+        indoor dry-bulb temperature and the computed air speed -- the
+        wind-chill effect (see `pcis.core.wind_chill`). NONE unless an
+        air speed was computed.
+
+        An ESTIMATE for the operator, anchored to Aviagen's worked
+        example, NOT a driver of the fan recommendation: Aviagen states
+        this figure "can only be estimated, not calculated", so the fan
+        sizing stays on the solid airflow/heat-balance physics and this
+        is reported alongside.
+    air_speed_mps : float | None
+        Bulk tunnel air velocity = delivered airflow / cross-section
+        (the continuity equation Q = V.A). NONE unless a cross-section
+        was supplied.
+
+        Reported, NOT yet acted on. This is the number that differs for
+        the same airflow in a wide vs. a narrow house, which the earlier
+        airflow-only output could not show. Its cooling EFFECT on the
+        birds (effective/felt temperature) needs a cited wind-chill
+        table and is deliberately not modelled here -- adding the felt-
+        temperature effect without that source would be inventing it.
+
+        It is a NOMINAL figure: it assumes air fills the full width x
+        height profile uniformly. Real velocity at bird level varies
+        with house design and obstructions. Flagged, not fudged.
     explanation : list[str]
         Human-readable engineering explanation, including every
         confidence deduction and its reason.
@@ -136,6 +171,10 @@ class Recommendation:
     comfort: ce.ComfortAssessment
     confidence_score: float
     target_unreachable: bool = False
+    delivered_airflow_m3_per_h: float | None = None
+    cross_section_area_m2: float | None = None
+    air_speed_mps: float | None = None
+    effective_temp_c: float | None = None
     explanation: list[str] = field(default_factory=list)
 
 
@@ -152,6 +191,7 @@ def recommend(
     delta_t_c: float,
     cooling_pad: CoolingPad | None = None,
     outdoor_co2_ppm: float = 420.0,
+    house_cross_section_m2: float | None = None,
 ) -> Recommendation:
     """Produce a fan-staging / pad on/off recommendation.
 
@@ -315,6 +355,47 @@ def recommend(
         f"{design_static_pressure_pa:.0f} Pa -> {fans_on} fan(s) needed."
     )
 
+    # --- Tunnel air speed (continuity: V = Q / A) -----------------------
+    # The airflow the recommended fans actually push -- >= required,
+    # because fan count is rounded up. This, not the requirement, is
+    # what moves past the birds.
+    delivered_airflow = fans_on * fan_flow
+    air_speed_mps: float | None = None
+    effective_temp_c: float | None = None
+    if house_cross_section_m2 is not None and house_cross_section_m2 > 0:
+        air_speed_mps = vs.tunnel_airspeed(delivered_airflow, house_cross_section_m2)
+        explanation.append(
+            f"Tunnel air speed: {delivered_airflow:,.0f} m3/h through a "
+            f"{house_cross_section_m2:.1f} m2 cross-section = {air_speed_mps:.2f} m/s "
+            "(continuity, V = airflow / area). Note: for the SAME airflow a "
+            "narrower house gives a higher velocity -- this is why cross-section, "
+            "not airflow alone, sets the air speed the birds feel. This is a "
+            "NOMINAL full-profile figure; real velocity at bird level varies with "
+            "house design and obstructions."
+        )
+        # Wind-chill / effective temperature -- an estimate for the
+        # operator, NOT a driver of the fan decision. Uses the indoor
+        # dry-bulb temperature the recommendation is targeting.
+        effective_temp_c = wc.effective_temperature_c(indoor_t_c, air_speed_mps)
+        drop = indoor_t_c - effective_temp_c
+        if drop > 0.05:
+            explanation.append(
+                f"Wind-chill estimate: at {air_speed_mps:.2f} m/s, fully-feathered "
+                f"birds feel about {effective_temp_c:.1f}C rather than the {indoor_t_c:.1f}C "
+                f"dry-bulb ({drop:.1f}C cooler) [Aviagen Ross Environmental Management, "
+                "500 ft/min ~= 10F anchor]. This is an ESTIMATE, not a measurement -- "
+                "Aviagen states effective temperature can only be estimated, not "
+                "calculated, and bird behaviour must be the guide. Younger/part-"
+                "feathered birds feel MORE and can be chill-stressed. It is reported "
+                "here, not used to size fans."
+            )
+        else:
+            explanation.append(
+                f"Wind-chill estimate: negligible at {air_speed_mps:.2f} m/s and "
+                f"{indoor_t_c:.1f}C (the effect fades above ~32C and reverses above "
+                "~38C) [Aviagen]."
+            )
+
     # --- Comfort assessment ---------------------------------------------
     w_indoor = psy.humidity_ratio_from_relative_humidity(indoor_t_c, indoor_rh_pct)
     twb_indoor = psy.wet_bulb_temperature(indoor_t_c, w_indoor)
@@ -343,5 +424,9 @@ def recommend(
         comfort=comfort,
         confidence_score=confidence,
         target_unreachable=target_unreachable,
+        delivered_airflow_m3_per_h=delivered_airflow,
+        cross_section_area_m2=house_cross_section_m2,
+        air_speed_mps=air_speed_mps,
+        effective_temp_c=effective_temp_c,
         explanation=explanation,
     )

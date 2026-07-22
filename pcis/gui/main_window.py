@@ -1042,6 +1042,8 @@ class MainWindow(QMainWindow):
             ("fans", "Fans ON"),
             ("pads", "Cooling pads"),
             ("airflow", "Required airflow"),
+            ("air_speed", "Tunnel air speed"),
+            ("effective_temp", "Bird feels (est.)"),
             ("governing", "Governing constraint"),
             ("confidence", "Confidence"),
         ])
@@ -1478,6 +1480,9 @@ class MainWindow(QMainWindow):
                 delta_t_c=inputs["delta_t_c"],
                 cooling_pad=inputs["cooling_pad"],
                 outdoor_co2_ppm=inputs["outdoor_co2_ppm"],
+                # Tunnel cross-section = width x eave height. Drives the
+                # reported air speed (V = airflow / cross-section).
+                house_cross_section_m2=inputs["width_m"] * inputs["height_m"],
             )
         except (ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Could not compute recommendation", str(exc))
@@ -1504,6 +1509,19 @@ class MainWindow(QMainWindow):
         m.set_value("pads", "ON" if result.pads_on else "off",
                     pal["OK"] if result.pads_on else pal["INK"])
         m.set_value("airflow", f"{airflow:,.0f}{s.airflow_suffix}")
+        if result.air_speed_mps is None:
+            m.set_value("air_speed", "—")
+        elif s is units.IMPERIAL:
+            # US poultry practice reads tunnel velocity in ft/min.
+            # 1 m/s = 196.850 ft/min (3.280840 ft/s x 60).
+            m.set_value("air_speed", f"{result.air_speed_mps * 196.850:,.0f} ft/min")
+        else:
+            m.set_value("air_speed", f"{result.air_speed_mps:.2f} m/s")
+        if result.effective_temp_c is None:
+            m.set_value("effective_temp", "—")
+        else:
+            feels = s.temp_from_si(result.effective_temp_c)
+            m.set_value("effective_temp", f"{feels:.1f}{s.temp_suffix}")
         m.set_value("governing", result.governing_constraint.replace("_", " "))
         m.set_value("confidence", f"{result.confidence_score:.0f}/100",
                     style.status_color(result.confidence_score / 100.0))

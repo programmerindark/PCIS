@@ -50,7 +50,83 @@ def init_db(db_path: str = "pcis.db", echo: bool = False) -> Engine:
     url = f"sqlite:///{db_path}" if db_path != ":memory:" else "sqlite:///:memory:"
     engine = create_engine(url, echo=echo)
     Base.metadata.create_all(engine)
+    _migrate_add_missing_columns(engine)
     return engine
+
+
+def _migrate_add_missing_columns(engine: Engine) -> list[str]:
+    """Add columns present in the models but missing from an existing
+    database, in place.
+
+    Why this is needed: `create_all()` creates missing *tables* but
+    never alters an existing one. So a database written by an older
+    version of PCIS keeps its old columns, and the first query that
+    references a newly-added column (age_days, is_test, note, ...) fails
+    with "no such column". That is a crash on upgrade for anyone who has
+    ever run the app before -- exactly what a farm operator hits the
+    second time they open it after an update.
+
+    This is a deliberately minimal migration: SQLite's ALTER TABLE ADD
+    COLUMN only *adds*, and every column PCIS has added over time is
+    either nullable or has a scalar default, so adding it to old rows is
+    safe and lossless. It does NOT drop, rename or retype columns -- if
+    a change ever needs that, it must be a real, considered migration,
+    not this automatic top-up. Returns the list of columns added, for
+    logging and tests.
+    """
+    from sqlalchemy import inspect, text
+
+    added: list[str] = []
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue  # create_all() already made it with every column
+            have = {col["name"] for col in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in have:
+                    continue
+                coltype = column.type.compile(dialect=engine.dialect)
+                clause = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {coltype}'
+                # A NOT NULL column needs a default to backfill existing
+                # rows; use the model's server/scalar default where given,
+                # otherwise leave it nullable-in-practice for old rows.
+                default = _column_default_sql(column)
+                if default is not None:
+                    clause += f" DEFAULT {default}"
+                conn.execute(text(clause))
+                added.append(f"{table.name}.{column.name}")
+
+    if added:
+        import logging
+        logging.getLogger(__name__).info(
+            "Database schema upgraded: added %d column(s): %s",
+            len(added), ", ".join(added),
+        )
+    return added
+
+
+def _column_default_sql(column) -> str | None:
+    """A SQL literal for a column's default, or None.
+
+    Only handles the scalar/boolean defaults PCIS actually uses; anything
+    exotic returns None and the column is added without a DEFAULT (fine
+    for nullable columns, which is what all of PCIS's added columns are).
+    """
+    default = column.default
+    if default is None or not getattr(default, "is_scalar", False):
+        return None
+    value = default.arg
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+    return None
 
 
 def save_house_config(

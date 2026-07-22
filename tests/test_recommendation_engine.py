@@ -302,3 +302,87 @@ def test_explanation_is_nonempty_and_readable():
     )
     assert len(result.explanation) >= 5
     assert all(isinstance(line, str) and line for line in result.explanation)
+
+
+# ---------------------------------------------------------------------------
+# Tunnel air speed (continuity: V = airflow / cross-section)
+#
+# The point the airflow-only output could not show: for the SAME airflow,
+# a narrower house produces a higher velocity. Reported, not yet acted on.
+# ---------------------------------------------------------------------------
+
+
+def _recommend(cross_section=None, fan_idx=1):
+    return re.recommend(
+        bird_count=20000, body_weight_kg=2.5,
+        indoor_t_c=29.0, indoor_rh_pct=60.0,
+        outdoor_t_c=38.0, outdoor_rh_pct=30.0,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[fan_idx],
+        design_static_pressure_pa=30.0, delta_t_c=3.0,
+        cooling_pad=CELDEK_7090_15_150MM,
+        house_cross_section_m2=cross_section,
+    )
+
+
+def test_air_speed_is_none_without_a_cross_section():
+    r = _recommend(cross_section=None)
+    assert r.air_speed_mps is None
+    assert r.cross_section_area_m2 is None
+
+
+def test_air_speed_matches_continuity_equation():
+    # V = (airflow m3/h / 3600) / area  -- computed from DELIVERED airflow.
+    r = _recommend(cross_section=45.0)   # e.g. 15 m wide x 3 m high
+    expected = (r.delivered_airflow_m3_per_h / 3600.0) / 45.0
+    assert r.air_speed_mps == pytest.approx(expected)
+    assert r.cross_section_area_m2 == 45.0
+
+
+def test_delivered_airflow_is_at_least_the_requirement():
+    # Fans are rounded up, so what they push is >= what was required.
+    r = _recommend(cross_section=45.0)
+    assert r.delivered_airflow_m3_per_h >= r.required_airflow_m3_per_h
+
+
+def test_narrower_house_gives_higher_air_speed_for_same_conditions():
+    # The whole reason cross-section matters: identical everything except
+    # a smaller tunnel profile must produce a faster air speed.
+    wide = _recommend(cross_section=60.0)
+    narrow = _recommend(cross_section=30.0)
+    assert narrow.air_speed_mps > wide.air_speed_mps
+    # And it should scale inversely with area (same delivered airflow).
+    if wide.delivered_airflow_m3_per_h == narrow.delivered_airflow_m3_per_h:
+        assert narrow.air_speed_mps == pytest.approx(wide.air_speed_mps * 2.0)
+
+
+def test_air_speed_appears_in_the_explanation_with_its_caveat():
+    r = _recommend(cross_section=45.0)
+    line = next(l for l in r.explanation if "Tunnel air speed" in l)
+    assert "m/s" in line
+    assert "NOMINAL" in line            # honest about the full-profile assumption
+    # the felt-temperature effect is now its own cited line
+    assert any("Wind-chill" in l for l in r.explanation)
+
+
+def test_effective_temperature_is_reported_when_cross_section_given():
+    r = _recommend(cross_section=45.0)
+    assert r.effective_temp_c is not None
+    # birds feel <= dry-bulb, and the estimate matches the wind_chill module
+    from pcis.core import wind_chill as wc
+    assert r.effective_temp_c == pytest.approx(
+        wc.effective_temperature_c(29.0, r.air_speed_mps)
+    )
+    assert r.effective_temp_c <= 29.0
+
+
+def test_effective_temperature_none_without_cross_section():
+    r = _recommend(cross_section=None)
+    assert r.effective_temp_c is None
+
+
+def test_windchill_line_is_flagged_as_estimate_not_fan_driver():
+    r = _recommend(cross_section=30.0)   # narrow -> fast -> real cooling
+    line = next(l for l in r.explanation if "Wind-chill" in l)
+    assert "ESTIMATE" in line
+    assert "Aviagen" in line
+    assert "not used to size fans" in line
