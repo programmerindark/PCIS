@@ -1,0 +1,43 @@
+# Vercel must not see this as a Python application.
+#
+# PCIS is a STATIC site: the Python runs in the visitor's browser via
+# Pyodide/WebAssembly, and Vercel only ever serves files. But Vercel's
+# framework detection sees pyproject.toml at the repo root, concludes
+# this is a Python serverless app, and fails with:
+#
+#   "No python entrypoint found. Set tool.vercel.entrypoint ..."
+#
+# Excluding the Python project from the deployment upload removes that
+# signal entirely. It also makes deploys faster, since only web/ is
+# transferred -- the desktop app, tests and build tooling are
+# irrelevant to serving a static page.
+#
+# NOTE: web/pcis_core.zip is NOT excluded. It is the engineering core
+# the browser loads, and the site is broken without it.
+
+pyproject.toml
+requirements.txt
+pcis/
+tests/
+tools/
+assets/
+docs/
+*.spec
+*.bat
+*.ps1
+*.md
+LICENSE
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+installer_output/
+Release/
+*.db
+*.egg-info
+installer.iss
+sample_report.pdf
+.gitignore

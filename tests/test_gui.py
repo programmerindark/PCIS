@@ -218,9 +218,9 @@ def test_run_recommendation_automatically_persists_house_and_recommendation(wind
 
 
 def test_run_recommendation_updates_record_status_label(window):
-    assert "Logged automatically" not in window.record_status_label.text()
+    assert "Logged" not in window.record_status_label.text()
     window.run_recommendation()
-    assert "Logged automatically" in window.record_status_label.text()
+    assert "Logged" in window.record_status_label.text()
     assert "House 1" in window.record_status_label.text()
 
 
@@ -604,3 +604,88 @@ def test_no_widget_overflows_its_parent_at_minimum_size(window):
             if g.right() > parent.width() + 2 or g.bottom() > parent.height() + 2:
                 offenders.append(f"{child.__class__.__name__} in {parent.__class__.__name__}")
     assert not offenders, f"widgets overflowing their parent: {offenders[:5]}"
+
+
+# ----------------------------------------------------------------------
+# History tab: review, tag and delete logged runs
+# ----------------------------------------------------------------------
+
+
+def _count_logs(window):
+    from pcis.db.session import count_recommendation_logs
+    with Session(window._engine) as s:
+        return count_recommendation_logs(s)
+
+
+def test_history_tab_lists_logged_runs(window):
+    window.run_recommendation()
+    window.run_recommendation()
+    window._refresh_history()
+    assert window.history_table.rowCount() == 2
+
+
+def test_test_checkbox_excludes_run_from_real_dataset(window):
+    window.test_run_checkbox.setChecked(True)
+    window.run_recommendation()
+    assert _count_logs(window) == (0, 1)
+
+
+def test_untick_checkbox_logs_a_real_run(window):
+    window.test_run_checkbox.setChecked(False)
+    window.run_recommendation()
+    assert _count_logs(window) == (1, 0)
+
+
+def test_mark_selected_as_test_then_real(window):
+    window.run_recommendation()
+    window._refresh_history()
+    window.history_table.selectRow(0)
+    window._flag_selected_history(True)
+    assert _count_logs(window) == (0, 1)
+    window.history_table.selectRow(0)
+    window._flag_selected_history(False)
+    assert _count_logs(window) == (1, 0)
+
+
+def test_delete_selected_removes_the_row(window):
+    window.run_recommendation()
+    window.run_recommendation()
+    window._refresh_history()
+    window.history_table.selectRow(0)
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+        window._delete_selected_history()
+    assert window.history_table.rowCount() == 1
+    assert sum(_count_logs(window)) == 1
+
+
+def test_delete_is_cancellable(window):
+    window.run_recommendation()
+    window._refresh_history()
+    window.history_table.selectRow(0)
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.No):
+        window._delete_selected_history()
+    assert sum(_count_logs(window)) == 1
+
+
+def test_export_real_data_excludes_test_rows(window):
+    window.test_run_checkbox.setChecked(True)
+    window.run_recommendation()
+    window.test_run_checkbox.setChecked(False)
+    window.run_recommendation()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "real.csv")
+        with patch.object(QMessageBox, "information", return_value=QMessageBox.Ok):
+            window.export_training_data(path=out, exclude_test=True)
+        with open(out, newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+    assert len(rows) == 2
+
+
+def test_history_summary_counts_real_and_test(window):
+    window.test_run_checkbox.setChecked(False)
+    window.run_recommendation()
+    window.test_run_checkbox.setChecked(True)
+    window.run_recommendation()
+    window._refresh_history()
+    text = window.history_summary.text()
+    assert "1 real" in text and "1 test" in text

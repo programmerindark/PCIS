@@ -2,7 +2,22 @@
 
 ## Status: engineering core, equipment data, recommendation engine, persistence, validation, PDF reports, a working PySide6 desktop GUI, and embedded charts are all functional and tested end-to-end. Two real-world usability issues reported after a working farm operator demoed it (indoor RH sometimes hits 80%, and weight should follow bird age) are now fixed. Every recommendation run is logged automatically (by bird age/day and timestamp, with outputs) as soon as you hit "Run Recommendation" -- no separate save step -- and the accumulated history can be exported as a CSV for future ML/calibration work. The Ross 308 growth-curve module is wired into the GUI and ready for the digital twin, which is still paused per your instruction pending the fan-scheduling feature below.
 
-**321/321 unit tests passing.** ~5,400 lines of source, ~3,600 lines of tests.
+**367/367 unit tests passing.** ~5,400 lines of source, ~3,600 lines of tests.
+
+### Latest changes (History tab — data curation)
+
+You spotted the real hole: every "Run Recommendation" click was logged identically, exploratory clicks and mistyped numbers included, with no way to see the history or remove garbage. Capture without curation isn't a dataset, it's noise.
+
+Added a **History tab** and the schema/DB support behind it:
+
+- **See every logged run** in a table — when, house, age, conditions, the decision, confidence, and whether it's flagged as a test.
+- **Mark runs as test vs real.** A "Log this as a test run" checkbox on the Recommendation tab tags exploratory runs up front; the History tab lets you re-tag any row afterwards. Test rows stay visible but are excluded from the training export. Reversible.
+- **Delete garbage permanently**, with a confirmation prompt. Deletion is real (that's the point); the dialog steers you toward "mark as test" if you only want it out of the export rather than gone.
+- **Two export modes:** the full dump (every row, with an `is_test` column so you can filter downstream) and "Export real data (CSV)" which drops test rows entirely.
+
+Schema: `RecommendationLog` gained `is_test` and `note` columns; `session.py` gained `all_recommendation_logs`, `count_recommendation_logs`, `delete_recommendation_logs`, `set_recommendation_test_flag`, `set_recommendation_note`; the CSV export gained an `exclude_test` option. 20 new tests (12 GUI + 5 DB + existing coverage extended).
+
+**A process note worth recording honestly:** building this, I corrupted the working tree by copying an older snapshot over the current one and lost the dark-theme and packaging work from the in-progress copy. Recovered by rebuilding from the last shipped release (v18) and re-applying the History changes onto it cleanly. Everything verified green afterwards — but it's a reminder that this project has been carried in two parallel directories the whole time, and that's exactly the kind of drift the app's own "one source of truth" rule exists to prevent. The repository on GitHub should be the single source from here.
 
 ### Latest changes (dark mode — desktop)
 

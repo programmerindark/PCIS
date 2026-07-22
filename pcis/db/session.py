@@ -177,6 +177,8 @@ def save_recommendation(
     outdoor_rh_pct: float,
     recommendation: Recommendation,
     age_days: int | None = None,
+    is_test: bool = False,
+    note: str | None = None,
 ) -> RecommendationLog:
     """Persist a full snapshot of a `recommendation_engine.recommend()`
     call -- inputs, outputs, and the comfort-assessment breakdown --
@@ -217,6 +219,8 @@ def save_recommendation(
         supply_air_t_c=recommendation.supply_air_t_c,
         supply_air_rh_pct=recommendation.supply_air_rh_pct,
         target_unreachable=recommendation.target_unreachable,
+        is_test=is_test,
+        note=note,
     )
     session.add(log)
     session.flush()
@@ -234,6 +238,93 @@ def recommendation_history(session: Session, house: HouseConfig, limit: int = 50
     return list(session.execute(stmt).scalars().all())
 
 
+# ---------------------------------------------------------------------------
+# Data curation: view, tag and delete logged runs
+#
+# Every "Run Recommendation" click logs a row, exploratory ones included.
+# Without a way to review and prune, the exported dataset fills with test
+# clicks and mistyped inputs -- noise that a model would train on as if it
+# were real. These helpers back the History tab.
+# ---------------------------------------------------------------------------
+
+
+def all_recommendation_logs(
+    session: Session,
+    include_test: bool = True,
+    limit: int | None = None,
+) -> list[RecommendationLog]:
+    """Every logged run across all houses, newest first.
+
+    `include_test=False` returns only rows NOT marked as tests -- i.e.
+    the data actually fit for training.
+    """
+    stmt = select(RecommendationLog).order_by(RecommendationLog.timestamp.desc())
+    if not include_test:
+        stmt = stmt.where(RecommendationLog.is_test.is_(False))
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(session.execute(stmt).scalars().all())
+
+
+def count_recommendation_logs(session: Session) -> tuple[int, int]:
+    """(real_count, test_count) across all houses."""
+    from sqlalchemy import func
+
+    total = session.execute(
+        select(func.count()).select_from(RecommendationLog)
+    ).scalar_one()
+    tests = session.execute(
+        select(func.count()).select_from(RecommendationLog)
+        .where(RecommendationLog.is_test.is_(True))
+    ).scalar_one()
+    return total - tests, tests
+
+
+def delete_recommendation_logs(session: Session, ids: list[int]) -> int:
+    """Permanently delete the given rows. Returns how many were removed.
+
+    Deletion is real and irreversible -- this is the point of the
+    feature (removing garbage), so there is no soft-delete. The GUI
+    confirms before calling this.
+    """
+    if not ids:
+        return 0
+    rows = list(session.execute(
+        select(RecommendationLog).where(RecommendationLog.id.in_(ids))
+    ).scalars().all())
+    for row in rows:
+        session.delete(row)
+    session.flush()
+    return len(rows)
+
+
+def set_recommendation_test_flag(session: Session, ids: list[int], is_test: bool) -> int:
+    """Mark rows as test (excluded from the real dataset) or real.
+
+    Reversible on purpose: a row wrongly marked as a test can be
+    restored, unlike a deletion. Returns how many rows were updated.
+    """
+    if not ids:
+        return 0
+    rows = list(session.execute(
+        select(RecommendationLog).where(RecommendationLog.id.in_(ids))
+    ).scalars().all())
+    for row in rows:
+        row.is_test = is_test
+    session.flush()
+    return len(rows)
+
+
+def set_recommendation_note(session: Session, log_id: int, note: str | None) -> bool:
+    """Attach or clear a free-text note on one row. Returns True if found."""
+    row = session.get(RecommendationLog, log_id)
+    if row is None:
+        return False
+    row.note = (note or "").strip() or None
+    session.flush()
+    return True
+
+
 #: Column order for `export_recommendation_logs_csv` -- one row per
 #: saved `RecommendationLog`, oldest first. Kept as an explicit list
 #: (rather than introspecting the ORM model) so the CSV schema is
@@ -248,6 +339,7 @@ RECOMMENDATION_LOG_CSV_COLUMNS = [
     "target_temp_c", "deviation_c", "thi", "thi_class", "comfort_index",
     "target_temp_rh_clamped",
     "supply_air_t_c", "supply_air_rh_pct", "target_unreachable",
+    "is_test", "note",
 ]
 
 
@@ -255,6 +347,7 @@ def export_recommendation_logs_csv(
     session: Session,
     output_path: str,
     house: HouseConfig | None = None,
+    exclude_test: bool = False,
 ) -> str:
     """Export saved `RecommendationLog` rows to a CSV file, one row per
     saved recommendation, oldest first -- a growing dataset intended
@@ -276,6 +369,10 @@ def export_recommendation_logs_csv(
         saved recommendation across all houses (a `house_name` column
         is included either way so the source house is always
         identifiable).
+    exclude_test : bool, optional
+        If True, rows marked as tests (`is_test`) are omitted -- i.e.
+        export only the data fit for training. Defaults to False so the
+        raw dump still includes everything with the flag visible.
 
     Returns
     -------
@@ -287,6 +384,8 @@ def export_recommendation_logs_csv(
     stmt = select(RecommendationLog).order_by(RecommendationLog.timestamp.asc())
     if house is not None:
         stmt = stmt.where(RecommendationLog.house_id == house.id)
+    if exclude_test:
+        stmt = stmt.where(RecommendationLog.is_test.is_(False))
     logs = list(session.execute(stmt).scalars().all())
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -318,6 +417,8 @@ def export_recommendation_logs_csv(
                 log.supply_air_t_c,
                 log.supply_air_rh_pct,
                 log.target_unreachable,
+                log.is_test,
+                log.note,
             ])
     return output_path
 

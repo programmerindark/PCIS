@@ -450,3 +450,86 @@ def test_get_or_create_house_config_updates_dimensions_and_surfaces_on_reuse(ses
     assert updated.height_m == pytest.approx(4.0)
     assert len(updated.surfaces) == 1
     assert updated.surfaces[0].area_m2 == pytest.approx(400.0)
+
+
+# ---------------------------------------------------------------------------
+# Data curation: view, tag, delete (History tab back-end)
+# ---------------------------------------------------------------------------
+
+
+def _one_recommendation(session, house, **kw):
+    result = re.recommend(
+        bird_count=20000, body_weight_kg=2.3,
+        indoor_t_c=29.0, indoor_rh_pct=60.0,
+        outdoor_t_c=35.0, outdoor_rh_pct=40.0,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[1],
+        design_static_pressure_pa=30.0, delta_t_c=3.0,
+    )
+    return save_recommendation(
+        session, house, bird_count=20000, body_weight_kg=2.3,
+        indoor_t_c=29.0, indoor_rh_pct=60.0, outdoor_t_c=35.0, outdoor_rh_pct=40.0,
+        recommendation=result, age_days=35, **kw,
+    )
+
+
+def test_all_recommendation_logs_can_exclude_tests(session):
+    from pcis.db.session import all_recommendation_logs
+    house = save_house_config(session, "Cur1", length_m=100, width_m=12, height_m=2.5, surfaces=SURFACES)
+    session.commit()
+    _one_recommendation(session, house)
+    _one_recommendation(session, house, is_test=True)
+    session.commit()
+    assert len(all_recommendation_logs(session)) == 2
+    assert len(all_recommendation_logs(session, include_test=False)) == 1
+
+
+def test_count_recommendation_logs_splits_real_and_test(session):
+    from pcis.db.session import count_recommendation_logs
+    house = save_house_config(session, "Cur2", length_m=100, width_m=12, height_m=2.5, surfaces=SURFACES)
+    session.commit()
+    _one_recommendation(session, house)
+    _one_recommendation(session, house)
+    _one_recommendation(session, house, is_test=True)
+    session.commit()
+    assert count_recommendation_logs(session) == (2, 1)
+
+
+def test_delete_recommendation_logs_is_permanent(session):
+    from pcis.db.session import all_recommendation_logs, delete_recommendation_logs
+    house = save_house_config(session, "Cur3", length_m=100, width_m=12, height_m=2.5, surfaces=SURFACES)
+    session.commit()
+    a = _one_recommendation(session, house)
+    _one_recommendation(session, house)
+    session.commit()
+    removed = delete_recommendation_logs(session, [a.id])
+    session.commit()
+    assert removed == 1
+    remaining = all_recommendation_logs(session)
+    assert len(remaining) == 1 and remaining[0].id != a.id
+
+
+def test_set_test_flag_is_reversible(session):
+    from pcis.db.session import count_recommendation_logs, set_recommendation_test_flag
+    house = save_house_config(session, "Cur4", length_m=100, width_m=12, height_m=2.5, surfaces=SURFACES)
+    session.commit()
+    a = _one_recommendation(session, house)
+    session.commit()
+    set_recommendation_test_flag(session, [a.id], True); session.commit()
+    assert count_recommendation_logs(session) == (0, 1)
+    set_recommendation_test_flag(session, [a.id], False); session.commit()
+    assert count_recommendation_logs(session) == (1, 0)
+
+
+def test_export_can_exclude_test_rows(session, tmp_path):
+    import csv as _csv
+    from pcis.db.session import export_recommendation_logs_csv
+    house = save_house_config(session, "Cur5", length_m=100, width_m=12, height_m=2.5, surfaces=SURFACES)
+    session.commit()
+    _one_recommendation(session, house)
+    _one_recommendation(session, house, is_test=True)
+    session.commit()
+    out = tmp_path / "real.csv"
+    export_recommendation_logs_csv(session, str(out), exclude_test=True)
+    rows = list(_csv.reader(open(out, newline="", encoding="utf-8")))
+    assert len(rows) == 2  # header + 1 real row
+    assert "is_test" in rows[0] and "note" in rows[0]

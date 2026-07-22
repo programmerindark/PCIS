@@ -32,6 +32,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -65,11 +66,15 @@ from pcis.core import growth_curve as gc
 from pcis.core import heat_moisture_balance as hmb
 from pcis.core import recommendation_engine as rec_engine
 from pcis.db.session import (
+    all_recommendation_logs,
+    count_recommendation_logs,
+    delete_recommendation_logs,
     export_recommendation_logs_csv,
     get_or_create_house_config,
     init_db,
     save_flock_record,
     save_recommendation,
+    set_recommendation_test_flag,
 )
 from pcis.equipment.cooling_pad import COOLING_PAD_CATALOG, CoolingPad
 from pcis.equipment.fan_curve import FAN_CATALOG, FanCurve
@@ -537,6 +542,8 @@ class MainWindow(QMainWindow):
         # nothing when the content fits.
         self.tabs.addTab(_scrollable(self._build_recommendation_tab()), "Recommendation")
         self.tabs.addTab(_scrollable(self._build_schedule_tab()), "Schedule")
+        self.tabs.addTab(self._build_history_tab(), "History")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # Connected only now that every widget the handler touches
         # exists -- see the note in _build_header.
@@ -1089,9 +1096,19 @@ class MainWindow(QMainWindow):
         expl_layout.addWidget(self.explanation_list)
         layout.addWidget(expl_group, stretch=3)
 
+        self.test_run_checkbox = QCheckBox("Log this as a test run (kept out of the real dataset)")
+        self.test_run_checkbox.setToolTip(
+            "Tick while you are just exploring or entering made-up numbers. The run is "
+            "still saved and visible in the History tab, but is excluded from the "
+            "training-data export so it cannot pollute the real dataset. You can change "
+            "this later in History."
+        )
+        layout.addWidget(self.test_run_checkbox)
+
         self.record_status_label = _hint(
             "Every recommendation you run is logged automatically (age, conditions, "
-            "fan/pad decision, comfort score) — nothing to click to save it."
+            "fan/pad decision, comfort score) — nothing to click to save it. Review, "
+            "tag or delete logged runs in the History tab."
         )
         layout.addWidget(self.record_status_label)
 
@@ -1112,6 +1129,148 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
 
         return widget
+
+    # ------------------------------------------------------------------
+    # History tab -- review, tag and delete logged runs
+    # ------------------------------------------------------------------
+
+    HISTORY_COLUMNS = ["ID", "When", "House", "Age", "Indoor", "Outdoor",
+                       "Fans", "Pads", "Conf.", "Test?", "Note"]
+
+    def _build_history_tab(self) -> QWidget:
+        """Every logged run, with the ability to tag or delete rows.
+
+        This is the curation half of the data logging. Capture without
+        curation fills the exported dataset with exploratory clicks and
+        mistyped inputs; this tab is where garbage gets found and removed
+        and where a genuine reading can be separated from a test.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        self.history_summary = QLabel()
+        f = QFont()
+        f.setPointSize(12)
+        f.setWeight(QFont.Bold)
+        self.history_summary.setFont(f)
+        layout.addWidget(self.history_summary)
+
+        layout.addWidget(_hint(
+            "Every recommendation you run is logged here. Select rows to mark them as "
+            "tests (excluded from the training export) or delete them. Deleting is "
+            "permanent; marking as a test is reversible."
+        ))
+
+        self.history_table = QTableWidget(0, len(self.HISTORY_COLUMNS))
+        self.history_table.setHorizontalHeaderLabels(self.HISTORY_COLUMNS)
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.verticalHeader().setVisible(False)
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.setMinimumHeight(340)
+        hh = self.history_table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.Interactive)
+        hh.setStretchLastSection(True)
+        layout.addWidget(self.history_table, stretch=1)
+
+        buttons = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_history)
+        mark_test_btn = QPushButton("Mark as test")
+        mark_test_btn.setToolTip("Exclude the selected rows from the training-data export.")
+        mark_test_btn.clicked.connect(lambda: self._flag_selected_history(True))
+        mark_real_btn = QPushButton("Mark as real")
+        mark_real_btn.setToolTip("Include the selected rows in the training-data export again.")
+        mark_real_btn.clicked.connect(lambda: self._flag_selected_history(False))
+        delete_btn = QPushButton("Delete selected…")
+        delete_btn.setToolTip("Permanently remove the selected rows. This cannot be undone.")
+        delete_btn.clicked.connect(self._delete_selected_history)
+        export_real_btn = QPushButton("Export real data (CSV)…")
+        export_real_btn.setToolTip("Export only rows NOT marked as tests.")
+        export_real_btn.clicked.connect(lambda: self.export_training_data(exclude_test=True))
+
+        buttons.addWidget(refresh_btn)
+        buttons.addWidget(mark_test_btn)
+        buttons.addWidget(mark_real_btn)
+        buttons.addWidget(delete_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(export_real_btn)
+        layout.addLayout(buttons)
+        return widget
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.tabText(index) == "History":
+            self._refresh_history()
+
+    def _refresh_history(self) -> None:
+        s = self._system
+        with Session(self._engine) as session:
+            logs = all_recommendation_logs(session, limit=1000)
+            real, tests = count_recommendation_logs(session)
+            rows = []
+            for log in logs:
+                rows.append((
+                    log.id,
+                    log.timestamp.strftime("%Y-%m-%d %H:%M"),
+                    log.house.name,
+                    "" if log.age_days is None else str(log.age_days),
+                    f"{s.temp_from_si(log.indoor_t_c):.0f}{s.temp_suffix}/{log.indoor_rh_pct:.0f}%",
+                    f"{s.temp_from_si(log.outdoor_t_c):.0f}{s.temp_suffix}/{log.outdoor_rh_pct:.0f}%",
+                    str(log.fans_on),
+                    "ON" if log.pads_on else "off",
+                    f"{log.confidence_score:.0f}",
+                    "TEST" if log.is_test else "",
+                    log.note or "",
+                ))
+
+        self.history_summary.setText(f"{real} real run(s), {tests} test run(s) logged")
+        self.history_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                if c == 0:
+                    item.setData(Qt.UserRole, row[0])
+                self.history_table.setItem(r, c, item)
+        self.history_table.resizeColumnsToContents()
+
+    def _selected_history_ids(self) -> list[int]:
+        ids = []
+        for idx in {i.row() for i in self.history_table.selectedIndexes()}:
+            item = self.history_table.item(idx, 0)
+            if item is not None:
+                ids.append(int(item.text()))
+        return ids
+
+    def _flag_selected_history(self, is_test: bool) -> None:
+        ids = self._selected_history_ids()
+        if not ids:
+            QMessageBox.information(self, "No rows selected", "Select one or more rows first.")
+            return
+        with Session(self._engine) as session:
+            set_recommendation_test_flag(session, ids, is_test)
+            session.commit()
+        self._refresh_history()
+
+    def _delete_selected_history(self) -> None:
+        ids = self._selected_history_ids()
+        if not ids:
+            QMessageBox.information(self, "No rows selected", "Select one or more rows first.")
+            return
+        confirm = QMessageBox.question(
+            self, "Delete runs?",
+            f"Permanently delete {len(ids)} logged run(s)?\n\n"
+            "This cannot be undone. If you only want to keep them out of the "
+            "training export, use Mark as test instead.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        with Session(self._engine) as session:
+            delete_recommendation_logs(session, ids)
+            session.commit()
+        self._refresh_history()
 
     def _build_schedule_tab(self) -> QWidget:
         """The digital twin: 'how many fans, at what time, for how long'."""
@@ -1410,13 +1569,17 @@ class MainWindow(QMainWindow):
                 outdoor_rh_pct=inputs["outdoor_rh_pct"],
                 recommendation=result,
                 age_days=inputs["age_days"],
+                is_test=self.test_run_checkbox.isChecked(),
             )
             session.commit()
+        tag = " (test)" if self.test_run_checkbox.isChecked() else ""
         self.record_status_label.setText(
-            f"Logged automatically: '{inputs['house_name']}', age {inputs['age_days']} days, "
-            f"{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}. Use \"Export Training Data (CSV)\" "
-            "any time to pull the full history."
+            f"Logged{tag}: '{inputs['house_name']}', age {inputs['age_days']} days, "
+            f"{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}. Review or delete runs in "
+            "the History tab."
         )
+        if hasattr(self, "history_table"):
+            self._refresh_history()
 
     def run_schedule(self) -> twin.SimulationResult | None:
         """Run the digital twin over the entered outdoor profile."""
@@ -1506,22 +1669,28 @@ class MainWindow(QMainWindow):
             self.schedule_notes_label.setText(summary)
         self.schedule_notes_label.setVisible(True)
 
-    def export_training_data(self, path: str | None = None) -> str | None:
-        """Export every saved recommendation (across all houses) as a
-        CSV suitable for future calibration/ML work -- see
-        `pcis.db.session.export_recommendation_logs_csv`.
+    def export_training_data(self, path: str | None = None,
+                             exclude_test: bool = False) -> str | None:
+        """Export saved recommendations as a CSV for calibration/ML work.
+
+        `exclude_test=True` drops rows marked as tests in the History
+        tab, so the file is only genuine data. The default keeps every
+        row with the `is_test` flag as a column, so the raw dump is
+        complete and the caller can filter it themselves.
         """
         if path is None:
+            default = "pcis_real_data.csv" if exclude_test else "pcis_training_data.csv"
             path, _ = QFileDialog.getSaveFileName(
                 self, "Export Training Data (CSV)",
-                str(paths.default_export_dir() / "pcis_training_data.csv"),
+                str(paths.default_export_dir() / default),
                 "CSV files (*.csv)"
             )
             if not path:
                 return None
         with Session(self._engine) as session:
-            export_recommendation_logs_csv(session, output_path=path)
-        QMessageBox.information(self, "Exported", f"Training data written to {path}")
+            export_recommendation_logs_csv(session, output_path=path, exclude_test=exclude_test)
+        scope = "Real data (test runs excluded)" if exclude_test else "Training data"
+        QMessageBox.information(self, "Exported", f"{scope} written to {path}")
         return path
 
     def export_pdf(self, path: str | None = None) -> str | None:

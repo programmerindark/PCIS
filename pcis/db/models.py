@@ -163,6 +163,17 @@ class RecommendationLog(Base):
     supply_air_rh_pct: Mapped[float | None] = mapped_column(default=None)
     target_unreachable: Mapped[bool | None] = mapped_column(default=None)
 
+    # Data-quality curation. Every "Run Recommendation" click logs a row,
+    # including exploratory clicks with nonsense inputs -- which would
+    # otherwise pollute the dataset the CSV export feeds. `is_test` marks
+    # a row as NOT real data: it stays visible in the History tab (so it
+    # can be reviewed or un-marked) but is excluded from the exported
+    # training set. `note` lets the operator label a row ("first hot day
+    # measured", "fat-fingered humidity") so garbage can be found and
+    # removed later rather than living forever as anonymous noise.
+    is_test: Mapped[bool] = mapped_column(default=False)
+    note: Mapped[str | None] = mapped_column(String(200), default=None)
+
     house: Mapped["HouseConfig"] = relationship(back_populates="recommendations")
 
 
