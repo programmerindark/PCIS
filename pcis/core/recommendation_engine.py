@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 
 from pcis.core import comfort_engine as ce
 from pcis.core import heat_moisture_balance as hmb
+from pcis.core import heating as htg
 from pcis.core import psychrometrics as psy
 from pcis.core import ventilation_solver as vs
 from pcis.core import wind_chill as wc
@@ -175,6 +176,10 @@ class Recommendation:
     cross_section_area_m2: float | None = None
     air_speed_mps: float | None = None
     effective_temp_c: float | None = None
+    heating_needed: bool = False
+    heat_deficit_w: float = 0.0
+    heater_duty_fraction: float | None = None
+    heater_undersized: bool = False
     explanation: list[str] = field(default_factory=list)
 
 
@@ -192,6 +197,7 @@ def recommend(
     cooling_pad: CoolingPad | None = None,
     outdoor_co2_ppm: float = 420.0,
     house_cross_section_m2: float | None = None,
+    heater_capacity_w: float | None = None,
 ) -> Recommendation:
     """Produce a fan-staging / pad on/off recommendation.
 
@@ -337,7 +343,38 @@ def recommend(
             "locally measured value."
         )
     min_vent_per_bird = vs.minimum_ventilation_rate_aviagen(body_weight_kg)
-    requirements["minimum_ventilation"] = min_vent_per_bird * bird_count
+    min_ventilation_m3_per_h = min_vent_per_bird * bird_count
+    requirements["minimum_ventilation"] = min_ventilation_m3_per_h
+
+    # --- Heating (cold-weather / brooding) ------------------------------
+    # The cold-weather counterpart of the cooling decision. Uses the same
+    # flock heat and envelope loss already computed, plus the heat to warm
+    # the minimum-ventilation air (which you must still run for air
+    # quality). See pcis.core.heating for the energy balance.
+    heat_req = htg.heating_requirement(
+        flock, envelope_loss, min_ventilation_m3_per_h,
+        indoor_t_c, outdoor_t_c, outdoor_rh_pct,
+        heater_capacity_w=heater_capacity_w,
+    )
+    if heat_req.heating_needed:
+        msg = (
+            f"HEATING NEEDED: the house loses {(heat_req.envelope_loss_w + heat_req.ventilation_loss_w)/1000:.1f} kW "
+            f"(envelope {heat_req.envelope_loss_w/1000:.1f} + warming ventilation air "
+            f"{heat_req.ventilation_loss_w/1000:.1f}) but the birds make only "
+            f"{heat_req.bird_sensible_heat_w/1000:.1f} kW, so heaters must supply "
+            f"{heat_req.heat_deficit_w/1000:.1f} kW to hold {indoor_t_c:.1f}C "
+            "[house energy balance, see heating.py]."
+        )
+        if heat_req.heater_duty_fraction is not None:
+            if heat_req.heater_undersized:
+                msg += (
+                    f" WARNING: the installed heater cannot meet this even running "
+                    f"continuously (needs {heat_req.heater_duty_fraction*100:.0f}% of a "
+                    "bigger heater)."
+                )
+            else:
+                msg += f" Run the heater about {heat_req.heater_duty_fraction*100:.0f}% of the time."
+        explanation.append(msg)
 
     governing_constraint = max(requirements, key=requirements.get)
     required_airflow = requirements[governing_constraint]
@@ -428,5 +465,9 @@ def recommend(
         cross_section_area_m2=house_cross_section_m2,
         air_speed_mps=air_speed_mps,
         effective_temp_c=effective_temp_c,
+        heating_needed=heat_req.heating_needed,
+        heat_deficit_w=heat_req.heat_deficit_w,
+        heater_duty_fraction=heat_req.heater_duty_fraction,
+        heater_undersized=heat_req.heater_undersized,
         explanation=explanation,
     )

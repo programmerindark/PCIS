@@ -202,6 +202,8 @@ class SimulationStep:
     pads_on: bool
     capacity_shortfall: bool
     target_unreachable: bool
+    heating_needed: bool
+    heater_duty_fraction: float | None
     recommendation: rec_engine.Recommendation
 
 
@@ -221,6 +223,7 @@ class ScheduleBlock:
 
     fans_on: int
     pads_on: bool
+    heating_needed: bool
     start_label: str
     end_label: str
     n_steps: int
@@ -236,6 +239,7 @@ class SimulationResult:
     fan_steps: int
     pad_steps: int
     shortfall_steps: int
+    heating_steps: int = 0
     unreachable_steps: int = 0
     notes: list[str] = field(default_factory=list)
 
@@ -270,6 +274,7 @@ def simulate_schedule(
     cooling_pad: CoolingPad | None = None,
     outdoor_co2_ppm: float = 420.0,
     installed_fan_count: int | None = None,
+    heater_capacity_w: float | None = None,
 ) -> SimulationResult:
     """Simulate fan/pad staging across a sequence of outdoor conditions
     at a fixed bird age -- i.e. "a day in the life" of the house.
@@ -348,6 +353,7 @@ def simulate_schedule(
             delta_t_c=delta_t_c,
             cooling_pad=cooling_pad,
             outdoor_co2_ppm=outdoor_co2_ppm,
+            heater_capacity_w=heater_capacity_w,
         )
         shortfall = installed_fan_count is not None and rec.fans_on > installed_fan_count
         steps.append(
@@ -362,6 +368,8 @@ def simulate_schedule(
                 pads_on=rec.pads_on,
                 capacity_shortfall=shortfall,
                 target_unreachable=rec.target_unreachable,
+                heating_needed=rec.heating_needed,
+                heater_duty_fraction=rec.heater_duty_fraction,
                 recommendation=rec,
             )
         )
@@ -382,6 +390,7 @@ def simulate_grow_out(
     cooling_pad: CoolingPad | None = None,
     outdoor_co2_ppm: float = 420.0,
     installed_fan_count: int | None = None,
+    heater_capacity_w: float | None = None,
 ) -> SimulationResult:
     """Simulate staging across a grow-out: same weather, advancing bird
     age -- i.e. "how does my fan requirement grow as the flock does".
@@ -434,6 +443,7 @@ def simulate_grow_out(
             delta_t_c=delta_t_c,
             cooling_pad=cooling_pad,
             outdoor_co2_ppm=outdoor_co2_ppm,
+            heater_capacity_w=heater_capacity_w,
         )
         shortfall = installed_fan_count is not None and rec.fans_on > installed_fan_count
         steps.append(
@@ -448,6 +458,8 @@ def simulate_grow_out(
                 pads_on=rec.pads_on,
                 capacity_shortfall=shortfall,
                 target_unreachable=rec.target_unreachable,
+                heating_needed=rec.heating_needed,
+                heater_duty_fraction=rec.heater_duty_fraction,
                 recommendation=rec,
             )
         )
@@ -465,11 +477,14 @@ def _summarize(
     """
     blocks: list[ScheduleBlock] = []
     for step in steps:
-        if blocks and blocks[-1].fans_on == step.fans_on and blocks[-1].pads_on == step.pads_on:
+        if (blocks and blocks[-1].fans_on == step.fans_on
+                and blocks[-1].pads_on == step.pads_on
+                and blocks[-1].heating_needed == step.heating_needed):
             prev = blocks[-1]
             blocks[-1] = ScheduleBlock(
                 fans_on=prev.fans_on,
                 pads_on=prev.pads_on,
+                heating_needed=prev.heating_needed,
                 start_label=prev.start_label,
                 end_label=step.label,
                 n_steps=prev.n_steps + 1,
@@ -479,6 +494,7 @@ def _summarize(
                 ScheduleBlock(
                     fans_on=step.fans_on,
                     pads_on=step.pads_on,
+                    heating_needed=step.heating_needed,
                     start_label=step.label,
                     end_label=step.label,
                     n_steps=1,
@@ -512,12 +528,22 @@ def _summarize(
             + TARGET_UNREACHABLE_NOTE
         )
 
+    heating_steps = sum(1 for s in steps if s.heating_needed)
+    if heating_steps:
+        notes.append(
+            f"HEATING: {heating_steps} of {len(steps)} steps need supplemental heat "
+            "(cold enough that the birds cannot keep the house at target on their "
+            "own). Minimum-ventilation fans still run for air quality even while "
+            "heating -- see the per-step detail."
+        )
+
     return SimulationResult(
         steps=steps,
         blocks=blocks,
         peak_fans_on=peak_fans_on,
         fan_steps=sum(1 for s in steps if s.fans_on > 0),
         pad_steps=sum(1 for s in steps if s.pads_on),
+        heating_steps=heating_steps,
         shortfall_steps=shortfall_steps,
         unreachable_steps=unreachable_steps,
         notes=notes,
@@ -531,8 +557,8 @@ def format_schedule_table(result: SimulationResult) -> str:
     as the text the GUI/PDF layer can reuse verbatim.
     """
     lines = [
-        f"{'Time/Age':<12} {'Outdoor':<16} {'Target':<9} {'Fans':<6} {'Pads':<6}",
-        "-" * 55,
+        f"{'Time/Age':<12} {'Outdoor':<16} {'Target':<9} {'Fans':<6} {'Pads':<6} {'Heat':<6}",
+        "-" * 62,
     ]
     for s in result.steps:
         flags = ""
@@ -540,18 +566,25 @@ def format_schedule_table(result: SimulationResult) -> str:
             flags += " (!capacity)"
         if s.target_unreachable:
             flags += " (!unreachable)"
+        if s.heating_needed and s.heater_duty_fraction is not None:
+            heat = f"{s.heater_duty_fraction*100:.0f}%"
+        elif s.heating_needed:
+            heat = "ON"
+        else:
+            heat = "off"
         lines.append(
             f"{s.label:<12} "
             f"{s.outdoor_t_c:>5.1f}C/{s.outdoor_rh_pct:>3.0f}%    "
             f"{s.target_indoor_t_c:>5.1f}C   "
-            f"{s.fans_on:<6}{'ON' if s.pads_on else 'off':<6}{flags}"
+            f"{s.fans_on:<6}{'ON' if s.pads_on else 'off':<6}{heat:<6}{flags}"
         )
     lines.append("")
     lines.append("Consolidated schedule:")
     for b in result.blocks:
         span = b.start_label if b.n_steps == 1 else f"{b.start_label} - {b.end_label}"
         lines.append(
-            f"  {span}: {b.fans_on} fan(s), pads {'ON' if b.pads_on else 'off'} "
+            f"  {span}: {b.fans_on} fan(s), pads {'ON' if b.pads_on else 'off'}, "
+            f"heat {'ON' if b.heating_needed else 'off'} "
             f"({b.n_steps} step{'s' if b.n_steps != 1 else ''})"
         )
     lines.append("")

@@ -1044,6 +1044,7 @@ class MainWindow(QMainWindow):
             ("airflow", "Required airflow"),
             ("air_speed", "Tunnel air speed"),
             ("effective_temp", "Bird feels (est.)"),
+            ("heating", "Heating"),
             ("governing", "Governing constraint"),
             ("confidence", "Confidence"),
         ])
@@ -1332,8 +1333,20 @@ class MainWindow(QMainWindow):
         self.step_hours_spin.setValue(3.0)
         self.step_hours_spin.setSuffix(" h")
         self.step_hours_spin.setDecimals(2)
+        self.heater_kw_spin = QDoubleSpinBox()
+        self.heater_kw_spin.setRange(0.0, 2000.0)
+        self.heater_kw_spin.setValue(0.0)
+        self.heater_kw_spin.setSuffix(" kW")
+        self.heater_kw_spin.setDecimals(1)
+        self.heater_kw_spin.setSpecialValueText("(not specified)")
+        self.heater_kw_spin.setToolTip(
+            "Total installed heater capacity. Needed only to turn the heating "
+            "requirement into an on-time (duty %). Leave at 0 to just see whether "
+            "heat is needed and how many kW."
+        )
         settings_form.addRow("Bird age", self.schedule_age_spin)
         settings_form.addRow("Fans installed", self.installed_fans_spin)
+        settings_form.addRow("Heater capacity", self.heater_kw_spin)
         settings_form.addRow("Time per row", self.step_hours_spin)
         settings_hint = _hint(
             "Fans installed only flags when the requirement exceeds what you actually "
@@ -1522,6 +1535,15 @@ class MainWindow(QMainWindow):
         else:
             feels = s.temp_from_si(result.effective_temp_c)
             m.set_value("effective_temp", f"{feels:.1f}{s.temp_suffix}")
+        if result.heating_needed:
+            kw = result.heat_deficit_w / 1000.0
+            if result.heater_duty_fraction is not None:
+                heat_txt = f"{kw:.0f} kW ({result.heater_duty_fraction*100:.0f}%)"
+            else:
+                heat_txt = f"{kw:.0f} kW"
+            m.set_value("heating", heat_txt, pal["WARN"])
+        else:
+            m.set_value("heating", "off")
         m.set_value("governing", result.governing_constraint.replace("_", " "))
         m.set_value("confidence", f"{result.confidence_score:.0f}/100",
                     style.status_color(result.confidence_score / 100.0))
@@ -1619,6 +1641,7 @@ class MainWindow(QMainWindow):
             return None
 
         installed = self.installed_fans_spin.value()
+        heater_kw = self.heater_kw_spin.value()
         try:
             result = twin.simulate_schedule(
                 conditions=conditions,
@@ -1632,6 +1655,7 @@ class MainWindow(QMainWindow):
                 cooling_pad=inputs["cooling_pad"],
                 outdoor_co2_ppm=inputs["outdoor_co2_ppm"],
                 installed_fan_count=installed if installed > 0 else None,
+                heater_capacity_w=(heater_kw * 1000.0) if heater_kw > 0 else None,
             )
         except (ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Could not build schedule", str(exc))
@@ -1668,9 +1692,10 @@ class MainWindow(QMainWindow):
                 else f"{block.start_label} – {block.end_label}"
             )
             hours = block.n_steps * step_h
+            heat = "heat ON" if block.heating_needed else "heat off"
             self.schedule_blocks_list.addItem(
                 f"{span}   →   {block.fans_on} fan(s), pads "
-                f"{'ON' if block.pads_on else 'off'}   ({hours:g} h)"
+                f"{'ON' if block.pads_on else 'off'}, {heat}   ({hours:g} h)"
             )
 
         summary = (

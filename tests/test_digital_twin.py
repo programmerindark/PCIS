@@ -473,3 +473,77 @@ def test_capacity_shortfall_and_unreachable_are_independent_flags():
     step = result.steps[0]
     assert step.capacity_shortfall is False
     assert step.target_unreachable is True
+
+
+# ---------------------------------------------------------------------------
+# Heaters in the schedule (cold-weather / brooding)
+# ---------------------------------------------------------------------------
+
+
+def _cold_day():
+    return [dt.OutdoorCondition(l, t, 80.0) for l, t in
+            [("00:00", 2.0), ("06:00", 0.0), ("12:00", 9.0), ("18:00", 4.0)]]
+
+
+def test_cold_brooding_schedule_calls_for_heat():
+    r = dt.simulate_schedule(
+        conditions=_cold_day(), age_days=5, bird_count=20000,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[1],
+        design_static_pressure_pa=30.0, delta_t_c=3.0, indoor_rh_pct=60.0,
+        heater_capacity_w=120_000.0,
+    )
+    assert r.heating_steps == len(r.steps)          # every step needs heat
+    assert all(s.heating_needed for s in r.steps)
+    assert all(s.heater_duty_fraction is not None for s in r.steps)
+    assert any("HEATING" in n for n in r.notes)
+
+
+def test_minimum_ventilation_fans_still_run_while_heating():
+    # A real winter house heats AND runs minimum-ventilation fans for air
+    # quality -- heating must not zero the fans.
+    r = dt.simulate_schedule(
+        conditions=_cold_day(), age_days=5, bird_count=20000,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[1],
+        design_static_pressure_pa=30.0, delta_t_c=3.0, indoor_rh_pct=60.0,
+    )
+    assert all(s.fans_on >= 1 for s in r.steps)
+    assert all(s.heating_needed for s in r.steps)
+
+
+def test_hot_day_schedule_needs_no_heat():
+    hot = [dt.OutdoorCondition(l, t, 45.0) for l, t in
+           [("12:00", 34.0), ("15:00", 37.0)]]
+    r = dt.simulate_schedule(
+        conditions=hot, age_days=35, bird_count=20000,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[1],
+        design_static_pressure_pa=30.0, delta_t_c=3.0, indoor_rh_pct=60.0,
+    )
+    assert r.heating_steps == 0
+    assert not any(s.heating_needed for s in r.steps)
+
+
+def test_schedule_blocks_split_on_heating_state():
+    # A day that starts cold (heat) and warms enough to stop heating must
+    # break into separate blocks at the transition.
+    mixed = [dt.OutdoorCondition("cold", -2.0, 80.0),
+             dt.OutdoorCondition("warm", 33.0, 45.0)]
+    r = dt.simulate_schedule(
+        conditions=mixed, age_days=14, bird_count=20000,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[1],
+        design_static_pressure_pa=30.0, delta_t_c=3.0, indoor_rh_pct=60.0,
+    )
+    heating_flags = {b.heating_needed for b in r.blocks}
+    assert len(r.blocks) >= 2
+    assert heating_flags == {True, False}
+
+
+def test_format_table_shows_a_heat_column():
+    r = dt.simulate_schedule(
+        conditions=_cold_day(), age_days=5, bird_count=20000,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[1],
+        design_static_pressure_pa=30.0, delta_t_c=3.0, indoor_rh_pct=60.0,
+        heater_capacity_w=120_000.0,
+    )
+    text = dt.format_schedule_table(r)
+    assert "Heat" in text
+    assert "heat ON" in text
