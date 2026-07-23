@@ -410,55 +410,53 @@ def test_unit_switch_redraws_the_last_result(window):
 
 
 # ----------------------------------------------------------------------
-# Schedule tab (digital twin)
+# Guided schedule tab (digital twin) -- replaced the old Schedule tab.
+# The single-page flow lives on `window.guided`; its own logic is
+# covered in depth in tests/test_guided.py. These tests check that it is
+# wired into the main window and behaves through it.
 # ----------------------------------------------------------------------
 
 
-def test_schedule_tab_seeds_a_default_profile(window):
-    assert window.profile_table.rowCount() > 0
+def test_guided_tab_seeds_a_default_profile(window):
+    assert window.guided.profile_table.rowCount() > 0
 
 
-def test_run_schedule_produces_a_result_and_populates_blocks(window):
-    result = window.run_schedule()
+def test_guided_build_produces_a_result_and_populates_blocks(window):
+    result = window.guided.build_schedule()
     assert result is not None
-    assert len(result.steps) == window.profile_table.rowCount()
-    assert window.schedule_blocks_list.count() == len(result.blocks)
-    assert not window.schedule_notes_label.isHidden()
+    assert len(result.steps) == window.guided.profile_table.rowCount()
+    assert window.guided.blocks_list.count() == len(result.blocks)
+    assert not window.guided.blocks_list.isHidden()
 
 
-def test_run_schedule_reads_profile_in_si(window):
+def test_guided_build_reads_profile_in_si(window):
     _select_imperial(window)
-    result = window.run_schedule()
+    result = window.guided.build_schedule()
     # Row 0 seeded at 24 degC; must still be 24 degC after display
     # conversion round-trips through the table.
     assert result.steps[0].outdoor_t_c == pytest.approx(24.0, abs=0.05)
 
 
-def test_run_schedule_with_bad_cell_warns_and_returns_none(window):
-    window.profile_table.item(0, 1).setText("garbage")
+def test_guided_build_with_bad_cell_warns_and_returns_none(window):
+    window.guided.profile_table.item(0, 1).setText("garbage")
     with patch.object(QMessageBox, "warning", return_value=QMessageBox.Ok) as mock_warn:
-        result = window.run_schedule()
+        result = window.guided.build_schedule()
     assert result is None
     mock_warn.assert_called_once()
 
 
-def test_run_schedule_with_empty_profile_warns(window):
-    window.profile_table.setRowCount(0)
+def test_guided_build_with_empty_profile_warns(window):
+    window.guided.profile_table.setRowCount(0)
     with patch.object(QMessageBox, "warning", return_value=QMessageBox.Ok) as mock_warn:
-        result = window.run_schedule()
+        result = window.guided.build_schedule()
     assert result is None
     mock_warn.assert_called_once()
 
 
 def test_installed_fan_shortfall_surfaces_in_the_notes(window):
-    window.installed_fans_spin.setValue(1)
-    window.run_schedule()
-    assert "WARNING" in window.schedule_notes_label.text()
-
-
-def test_schedule_chart_plots_every_step(window):
-    result = window.run_schedule()
-    assert window.schedule_chart.fan_values() == [float(s.fans_on) for s in result.steps]
+    window.guided.installed_fans_spin.setValue(1)
+    window.guided.build_schedule()
+    assert "WARNING" in window.guided.notes_label.text()
 
 
 def test_comfort_chart_follows_the_unit_selector(window):
@@ -546,12 +544,12 @@ def test_chart_is_hidden_until_there_is_something_to_plot(window):
     assert window.empty_state_label.isHidden()
 
 
-def test_schedule_chart_is_hidden_until_built(window):
-    assert window.schedule_chart.isHidden()
-    assert not window.schedule_empty_label.isHidden()
-    window.run_schedule()
-    assert not window.schedule_chart.isHidden()
-    assert window.schedule_empty_label.isHidden()
+def test_guided_blocks_hidden_until_built(window):
+    assert window.guided.blocks_list.isHidden()
+    assert not window.guided.empty_label.isHidden()
+    window.guided.build_schedule()
+    assert not window.guided.blocks_list.isHidden()
+    assert window.guided.empty_label.isHidden()
 
 
 def test_every_user_facing_input_has_a_tooltip(window):
@@ -571,7 +569,11 @@ def test_every_user_facing_input_has_a_tooltip(window):
 def test_tables_allow_the_user_to_resize_columns(window):
     from PySide6.QtWidgets import QHeaderView
 
-    for table in (window.envelope_editor.table, window.profile_table):
+    for table in (
+        window.envelope_editor.table,
+        window.guided.envelope_editor.table,
+        window.guided.profile_table,
+    ):
         header = table.horizontalHeader()
         assert header.sectionResizeMode(0) == QHeaderView.Interactive
         assert header.stretchLastSection()
@@ -583,7 +585,7 @@ def test_no_widget_overflows_its_parent_at_minimum_size(window):
     window.resize(window.minimumWidth(), window.minimumHeight())
     window.show()
     window.run_recommendation()
-    window.run_schedule()
+    window.guided.build_schedule()
 
     offenders = []
     for i in range(window.tabs.count()):

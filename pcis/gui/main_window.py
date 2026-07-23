@@ -79,137 +79,19 @@ from pcis.db.session import (
 from pcis.equipment.cooling_pad import COOLING_PAD_CATALOG, CoolingPad
 from pcis.equipment.fan_curve import FAN_CATALOG, FanCurve
 from pcis.gui import style, units
+from pcis.gui.widgets import (
+    EnvelopeSurfaceEditor,
+    SI_ROLE,
+    UnitAwareSpinBox,
+    _cell_si_value,
+    _hint,
+    _scrollable,
+    _si_cell,
+)
+from pcis.gui.guided import GuidedScheduleWidget
 from pcis import config, logging_setup, paths, update_service, version
-from pcis.gui.charts import ComfortChartWidget, FanCurveChartWidget, ScheduleChartWidget
+from pcis.gui.charts import ComfortChartWidget, FanCurveChartWidget
 from pcis.reports.pdf_report import generate_recommendation_report
-
-
-class UnitAwareSpinBox(QDoubleSpinBox):
-    """A spinbox that holds an SI value but displays a converted one.
-
-    The critical property: `si_value()` always returns SI regardless of
-    what unit system is selected. Callers that feed the engineering
-    core must use `si_value()`/`set_si_value()`, never `value()`.
-
-    Range limits are given in SI and converted alongside the value, so
-    switching units never silently clamps a legitimate entry.
-    """
-
-    def __init__(
-        self,
-        quantity: str,
-        si_minimum: float,
-        si_maximum: float,
-        si_value: float,
-        decimals: int = 2,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._quantity = quantity
-        self._si_min = si_minimum
-        self._si_max = si_maximum
-        self._system = units.METRIC
-        self._si_exact = si_value
-        self.setDecimals(decimals)
-        self._apply_system(units.METRIC, si_value)
-
-    def _converters(self, system: units.UnitSystem):
-        return (
-            getattr(system, f"{self._quantity}_from_si"),
-            getattr(system, f"{self._quantity}_to_si"),
-        )
-
-    def _apply_system(self, system: units.UnitSystem, si_value: float) -> None:
-        from_si, _ = self._converters(system)
-        self._system = system
-        lo, hi = from_si(self._si_min), from_si(self._si_max)
-        if lo > hi:  # no current quantity inverts, but be safe
-            lo, hi = hi, lo
-        self.blockSignals(True)
-        self.setRange(lo, hi)
-        self.setSuffix(getattr(system, f"{self._quantity}_suffix"))
-        self.setValue(from_si(si_value))
-        self.blockSignals(False)
-        self._si_exact = si_value
-
-    def set_unit_system(self, system: units.UnitSystem) -> None:
-        """Re-display the same physical value in a different system."""
-        self._apply_system(system, self.si_value())
-
-    def si_value(self) -> float:
-        """The value in SI.
-
-        Returns the exact stored SI value when the box still displays
-        an unedited rendering of it, rather than converting the
-        displayed number back. The box shows 2 decimals, so 150 m
-        renders as 492.13 ft and converts back to 150.0012 m -- a
-        harmless 1.2 mm on a house, but it compounds every time the
-        user toggles units, and it makes "switch units twice" fail to
-        return the original number. Preferring the stored value keeps
-        unit switching exactly lossless while still honouring real
-        edits.
-        """
-        from_si, to_si = self._converters(self._system)
-        from_display = to_si(self.value())
-        displayed_exact = round(from_si(self._si_exact), self.decimals())
-        if abs(self.value() - displayed_exact) < 10 ** (-self.decimals()) / 2:
-            return self._si_exact
-        return from_display
-
-    def set_si_value(self, si_value: float) -> None:
-        from_si, _ = self._converters(self._system)
-        self.blockSignals(True)
-        self.setValue(from_si(si_value))
-        self.blockSignals(False)
-        self._si_exact = si_value
-
-
-#: Qt item-data role used to stash the exact SI value behind a table
-#: cell whose text is a rounded, human-readable rendering of it.
-SI_ROLE = Qt.UserRole + 1
-
-
-def _si_cell(display_value: float, si_value: float) -> QTableWidgetItem:
-    """A table cell showing a rounded value but remembering exact SI.
-
-    Formatting a number for display loses precision (0.6 W/m²K becomes
-    "0.105672" in imperial, which converts back to 0.5999994). That
-    drift is invisible per switch but compounds if a user toggles units
-    repeatedly. Stashing the exact SI value on the item makes the
-    round-trip lossless while still showing a readable number.
-    """
-    item = QTableWidgetItem(f"{display_value:g}")
-    item.setData(SI_ROLE, si_value)
-    return item
-
-
-def _cell_si_value(item: QTableWidgetItem | None, display_text_to_si) -> float:
-    """Exact SI for a cell, preferring the stashed value when the text
-    has not been edited since it was written.
-
-    If the user has typed in the cell, the stashed value is stale and
-    the typed text wins -- otherwise edits would be silently ignored.
-    """
-    if item is None:
-        return 0.0
-    typed = float(item.text())
-    stashed = item.data(SI_ROLE)
-    if stashed is not None and f"{stashed:g}" != item.text():
-        # Text differs from a plain rendering of the stashed SI; it may
-        # be a converted display value OR a user edit. Distinguish by
-        # re-rendering the stashed SI in the current system.
-        from_display = display_text_to_si(typed)
-        # Tolerance sized to swallow display rounding (%g keeps 6
-        # significant figures, so round-trip drift lands around 1e-6
-        # relative) while still catching any edit a human would
-        # actually make -- nobody retypes a value to change it by
-        # 0.01%.
-        if abs(from_display - float(stashed)) <= abs(float(stashed)) * 1e-4:
-            return float(stashed)
-        return from_display
-    if stashed is not None:
-        return float(stashed)
-    return display_text_to_si(typed)
 
 
 class MetricsPanel(QWidget):
@@ -364,140 +246,6 @@ class ExplanationView(QTextBrowser):
         self.setHtml("".join(rows))
 
 
-def _hint(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setWordWrap(True)
-    label.setProperty("hint", True)
-    return label
-
-
-def _scrollable(inner: QWidget) -> QScrollArea:
-    """Wrap a tab body in a scroll area.
-
-    Windows display scaling at 125%/150% makes every widget taller; a
-    form that fits at 100% can overflow the window at 150% and leave
-    controls unreachable. Scrolling costs nothing when it isn't needed
-    and prevents that failure entirely.
-    """
-    area = QScrollArea()
-    area.setWidget(inner)
-    area.setWidgetResizable(True)
-    area.setFrameShape(QFrame.NoFrame)
-    return area
-
-
-class EnvelopeSurfaceEditor(QWidget):
-    """Editable table of building-envelope surfaces (name / U-value /
-    area), backed 1:1 by `pcis.core.heat_moisture_balance.Surface`.
-
-    Values are entered and stored in SI. Column headers show the
-    current unit system's labels, and switching systems converts the
-    displayed numbers -- the underlying `Surface` objects handed to the
-    engineering core are always SI.
-    """
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._system = units.METRIC
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.table = QTableWidget(0, 3)
-        self._refresh_headers()
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(True)
-        header.setMinimumSectionSize(90)
-        self.table.setAlternatingRowColors(True)
-        # Interactive sections start at Qt's default width, which is
-        # narrower than these headers -- "Surface name" rendered as
-        # "urface nam". Size to the header text once; the user can still
-        # drag from there.
-        self.table.resizeColumnsToContents()
-        for col in range(self.table.columnCount() - 1):
-            self.table.setColumnWidth(col, max(self.table.columnWidth(col) + 24, 130))
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setMinimumHeight(140)
-        layout.addWidget(self.table)
-
-        buttons = QHBoxLayout()
-        add_btn = QPushButton("Add surface")
-        add_btn.clicked.connect(lambda: self.add_row())
-        remove_btn = QPushButton("Remove selected")
-        remove_btn.clicked.connect(self.remove_selected)
-        buttons.addWidget(add_btn)
-        buttons.addWidget(remove_btn)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
-
-        # Seed with two typical rows the user can edit rather than
-        # starting from a totally blank table.
-        self.add_row("sidewalls", 0.6, 350.0)
-        self.add_row("ceiling", 0.4, 1500.0)
-
-    def _refresh_headers(self) -> None:
-        s = self._system
-        self.table.setHorizontalHeaderLabels(
-            ["Surface name", f"U-value ({s.u_value_suffix.strip()})", f"Area ({s.area_suffix.strip()})"]
-        )
-
-    def set_unit_system(self, system: units.UnitSystem) -> None:
-        surfaces = self._read_si_rows()
-        self._system = system
-        self._refresh_headers()
-        self.table.setRowCount(0)
-        for name, u_si, area_si in surfaces:
-            self.add_row(name, u_si, area_si)
-
-    def _read_si_rows(self) -> list[tuple[str, float, float]]:
-        """Current rows as (name, u_si, area_si), tolerating bad cells."""
-        rows = []
-        for row in range(self.table.rowCount()):
-            name_item = self.table.item(row, 0)
-            name = name_item.text() if name_item else f"surface_{row}"
-            try:
-                u_si = _cell_si_value(self.table.item(row, 1), self._system.u_value_to_si)
-                area_si = _cell_si_value(self.table.item(row, 2), self._system.area_to_si)
-            except ValueError:
-                u_si, area_si = 0.0, 0.0
-            rows.append((name, u_si, area_si))
-        return rows
-
-    def add_row(self, name: str = "surface", u_value: float = 0.5, area_m2: float = 100.0) -> None:
-        """Add a row. `u_value` and `area_m2` are SI; they are converted
-        for display according to the current unit system.
-        """
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(name))
-        self.table.setItem(row, 1, _si_cell(self._system.u_value_from_si(u_value), u_value))
-        self.table.setItem(row, 2, _si_cell(self._system.area_from_si(area_m2), area_m2))
-
-    def remove_selected(self) -> None:
-        for index in sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True):
-            self.table.removeRow(index)
-
-    def surfaces(self) -> list[hmb.Surface]:
-        """Read the table back out as domain objects, in SI. Raises
-        ValueError (surfaced to the user via a message box by the
-        caller) if any row has invalid numbers.
-        """
-        result = []
-        for row in range(self.table.rowCount()):
-            name_item = self.table.item(row, 0)
-            u_item = self.table.item(row, 1)
-            a_item = self.table.item(row, 2)
-            name = name_item.text() if name_item else f"surface_{row}"
-            try:
-                u_si = _cell_si_value(u_item, self._system.u_value_to_si)
-                area_si = _cell_si_value(a_item, self._system.area_to_si)
-            except ValueError as exc:
-                raise ValueError(f"Row {row + 1} ({name}): U-value and area must be numbers") from exc
-            result.append(hmb.Surface(name=name, u_value=u_si, area_m2=area_si))
-        return result
-
-
 class MainWindow(QMainWindow):
     def __init__(self, db_path: str | None = None) -> None:
         """`db_path=None` picks the correct location for how the app is
@@ -541,7 +289,8 @@ class MainWindow(QMainWindow):
         # buttons ended up drawn on top of its table. Scrolling costs
         # nothing when the content fits.
         self.tabs.addTab(_scrollable(self._build_recommendation_tab()), "Recommendation")
-        self.tabs.addTab(_scrollable(self._build_schedule_tab()), "Schedule")
+        self.guided = GuidedScheduleWidget()
+        self.tabs.addTab(_scrollable(self.guided), "Guided Schedule")
         self.tabs.addTab(self._build_history_tab(), "History")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -651,12 +400,6 @@ class MainWindow(QMainWindow):
                                "a temperature DIFFERENCE: 1 °C = 1.8 °F, with no 32° offset.",
             self.outdoor_co2_spin: "Ambient outdoor CO₂. Leaving the 420 ppm default costs "
                                    "10 confidence points.",
-            self.schedule_age_spin: "Bird age for the simulated day. Day 0 cannot be "
-                                    "simulated — see the age note in the docs.",
-            self.installed_fans_spin: "How many fans you physically have. Used only to flag "
-                                      "a shortfall; the requirement is never capped to it.",
-            self.step_hours_spin: "How much time each row of the profile represents. Used to "
-                                  "convert step counts into hours.",
         }
         for widget, tip in tips.items():
             widget.setToolTip(tip)
@@ -755,27 +498,14 @@ class MainWindow(QMainWindow):
         SI value across the switch, so no recomputation is needed and
         no precision is lost by round-tripping.
         """
-        # Read the schedule profile in SI using the OUTGOING system
-        # before anything switches. Reading it afterwards would
-        # reinterpret the on-screen "24" as 24 degF instead of
-        # converting the 24 degC it actually represents.
-        try:
-            profile_si = self.read_profile()
-        except ValueError:
-            profile_si = None
-
         system: units.UnitSystem = self.unit_combo.currentData()
         self._display_system = system
 
         for spin in self._unit_spins:
             spin.set_unit_system(system)
         self.envelope_editor.set_unit_system(system)
-
-        if profile_si is not None:
-            self.profile_table.setRowCount(0)
-            self._refresh_profile_headers()
-            for cond in profile_si:
-                self._add_profile_row(cond.label, cond.t_c, cond.rh_pct)
+        # The guided page owns its own inputs; let it convert them too.
+        self.guided.set_unit_system(system)
         self._refresh_fan_chart()
         # Re-render the last result so its units follow the selector too.
         if self._last_result is not None and self._last_inputs is not None:
@@ -1275,171 +1005,6 @@ class MainWindow(QMainWindow):
             session.commit()
         self._refresh_history()
 
-    def _build_schedule_tab(self) -> QWidget:
-        """The digital twin: 'how many fans, at what time, for how long'."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(11)
-
-        top = QHBoxLayout()
-
-        profile_group = QGroupBox("Outdoor conditions through the day")
-        profile_layout = QVBoxLayout(profile_group)
-        profile_layout.addWidget(
-            _hint(
-                "PCIS deliberately ships no built-in weather curve — a defensible one is "
-                "site- and season-specific. Enter your own readings, or edit the starting "
-                "rows below."
-            )
-        )
-        self.profile_table = QTableWidget(0, 3)
-        self.profile_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.profile_table.verticalHeader().setVisible(False)
-        pheader = self.profile_table.horizontalHeader()
-        pheader.setSectionResizeMode(QHeaderView.Interactive)
-        pheader.setStretchLastSection(True)
-        pheader.setMinimumSectionSize(90)
-        self.profile_table.setAlternatingRowColors(True)
-        self.profile_table.setMinimumHeight(260)
-        profile_layout.addWidget(self.profile_table, stretch=1)
-
-        prof_btns = QHBoxLayout()
-        add_row_btn = QPushButton("Add time")
-        add_row_btn.clicked.connect(lambda: self._add_profile_row("12:00", 30.0, 50.0))
-        del_row_btn = QPushButton("Remove selected")
-        del_row_btn.clicked.connect(self._remove_profile_rows)
-        prof_btns.addWidget(add_row_btn)
-        prof_btns.addWidget(del_row_btn)
-        prof_btns.addStretch(1)
-        profile_layout.addLayout(prof_btns)
-        profile_group.setMinimumHeight(360)
-        top.addWidget(profile_group, stretch=3)
-
-        settings_group = QGroupBox("Simulation settings")
-        settings_form = QFormLayout(settings_group)
-        settings_form.setSpacing(9)
-        settings_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.schedule_age_spin = QSpinBox()
-        self.schedule_age_spin.setRange(0, 100)
-        self.schedule_age_spin.setValue(35)
-        self.schedule_age_spin.setSuffix(" days")
-        self.installed_fans_spin = QSpinBox()
-        self.installed_fans_spin.setRange(0, 200)
-        self.installed_fans_spin.setValue(8)
-        self.installed_fans_spin.setSpecialValueText("(not specified)")
-        self.step_hours_spin = QDoubleSpinBox()
-        self.step_hours_spin.setRange(0.25, 24.0)
-        self.step_hours_spin.setValue(3.0)
-        self.step_hours_spin.setSuffix(" h")
-        self.step_hours_spin.setDecimals(2)
-        self.heater_kw_spin = QDoubleSpinBox()
-        self.heater_kw_spin.setRange(0.0, 2000.0)
-        self.heater_kw_spin.setValue(0.0)
-        self.heater_kw_spin.setSuffix(" kW")
-        self.heater_kw_spin.setDecimals(1)
-        self.heater_kw_spin.setSpecialValueText("(not specified)")
-        self.heater_kw_spin.setToolTip(
-            "Total installed heater capacity. Needed only to turn the heating "
-            "requirement into an on-time (duty %). Leave at 0 to just see whether "
-            "heat is needed and how many kW."
-        )
-        settings_form.addRow("Bird age", self.schedule_age_spin)
-        settings_form.addRow("Fans installed", self.installed_fans_spin)
-        settings_form.addRow("Heater capacity", self.heater_kw_spin)
-        settings_form.addRow("Time per row", self.step_hours_spin)
-        settings_hint = _hint(
-            "Fans installed only flags when the requirement exceeds what you actually "
-            "have — the required count is never capped to it, since capping would hide "
-            "the shortfall."
-        )
-        settings_hint.setMinimumHeight(72)
-        settings_form.addRow(settings_hint)
-        settings_group.setMinimumHeight(300)
-        settings_group.setAlignment(Qt.AlignTop)
-        top.addWidget(settings_group, stretch=2)
-        layout.addLayout(top)
-
-        run_schedule_btn = QPushButton("Build Schedule")
-        run_schedule_btn.setProperty("primary", True)
-        run_schedule_btn.clicked.connect(self.run_schedule)
-        layout.addWidget(run_schedule_btn)
-
-        self.schedule_chart = ScheduleChartWidget()
-        self.schedule_chart.setMinimumHeight(300)
-        self.schedule_chart.setVisible(False)
-        layout.addWidget(self.schedule_chart, stretch=1)
-
-        self.schedule_empty_label = _hint(
-            "Press “Build Schedule” to simulate the day and see how many fans "
-            "should run at each time."
-        )
-        self.schedule_empty_label.setAlignment(Qt.AlignCenter)
-        self.schedule_empty_label.setMinimumHeight(48)
-        layout.addWidget(self.schedule_empty_label)
-
-        blocks_group = QGroupBox("Consolidated schedule")
-        blocks_layout = QVBoxLayout(blocks_group)
-        self.schedule_blocks_list = QListWidget()
-        self.schedule_blocks_list.setWordWrap(True)
-        self.schedule_blocks_list.setMinimumHeight(150)
-        blocks_layout.addWidget(self.schedule_blocks_list)
-        layout.addWidget(blocks_group, stretch=1)
-
-        self.schedule_notes_label = QLabel()
-        self.schedule_notes_label.setWordWrap(True)
-        self.schedule_notes_label.setVisible(False)
-        layout.addWidget(self.schedule_notes_label)
-
-        for label, t_c, rh in [
-            ("00:00", 24.0, 80.0), ("03:00", 22.0, 85.0), ("06:00", 21.0, 85.0),
-            ("09:00", 28.0, 60.0), ("12:00", 34.0, 45.0), ("15:00", 37.0, 38.0),
-            ("18:00", 34.0, 45.0), ("21:00", 28.0, 65.0),
-        ]:
-            self._add_profile_row(label, t_c, rh)
-        self._refresh_profile_headers()
-        self.profile_table.resizeColumnsToContents()
-        for col in range(self.profile_table.columnCount() - 1):
-            self.profile_table.setColumnWidth(
-                col, max(self.profile_table.columnWidth(col) + 24, 130))
-        return widget
-
-    def _refresh_profile_headers(self) -> None:
-        s = self._system
-        self.profile_table.setHorizontalHeaderLabels(
-            ["Time", f"Outdoor temp ({s.temp_suffix.strip()})", "Outdoor RH (%)"]
-        )
-
-    def _add_profile_row(self, label: str, t_c: float, rh_pct: float) -> None:
-        """Add a profile row. `t_c` is SI (Celsius); displayed converted."""
-        row = self.profile_table.rowCount()
-        self.profile_table.insertRow(row)
-        self.profile_table.setItem(row, 0, QTableWidgetItem(label))
-        self.profile_table.setItem(row, 1, _si_cell(self._system.temp_from_si(t_c), t_c))
-        self.profile_table.setItem(row, 2, QTableWidgetItem(f"{rh_pct:g}"))
-
-    def _remove_profile_rows(self) -> None:
-        for index in sorted({i.row() for i in self.profile_table.selectedIndexes()}, reverse=True):
-            self.profile_table.removeRow(index)
-
-    def read_profile(self) -> list[twin.OutdoorCondition]:
-        """Read the schedule tab's table into domain objects, in SI."""
-        conditions = []
-        for row in range(self.profile_table.rowCount()):
-            label_item = self.profile_table.item(row, 0)
-            t_item = self.profile_table.item(row, 1)
-            rh_item = self.profile_table.item(row, 2)
-            label = label_item.text() if label_item else f"step {row + 1}"
-            try:
-                t_c = _cell_si_value(t_item, self._system.temp_to_si)
-                rh = float(rh_item.text()) if rh_item else 0.0
-            except ValueError as exc:
-                raise ValueError(
-                    f"Row {row + 1} ({label}): temperature and humidity must be numbers"
-                ) from exc
-            conditions.append(twin.OutdoorCondition(label=label, t_c=t_c, rh_pct=rh))
-        return conditions
-
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
@@ -1621,50 +1186,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "history_table"):
             self._refresh_history()
 
-    def run_schedule(self) -> twin.SimulationResult | None:
-        """Run the digital twin over the entered outdoor profile."""
-        try:
-            conditions = self.read_profile()
-        except ValueError as exc:
-            QMessageBox.warning(self, "Invalid schedule input", str(exc))
-            return None
-        if not conditions:
-            QMessageBox.warning(
-                self, "No conditions", "Add at least one row to the outdoor conditions table."
-            )
-            return None
-
-        try:
-            inputs = self.gather_inputs()
-        except ValueError as exc:
-            QMessageBox.warning(self, "Invalid input", str(exc))
-            return None
-
-        installed = self.installed_fans_spin.value()
-        heater_kw = self.heater_kw_spin.value()
-        try:
-            result = twin.simulate_schedule(
-                conditions=conditions,
-                age_days=float(self.schedule_age_spin.value()),
-                bird_count=inputs["bird_count"],
-                envelope_surfaces=inputs["surfaces"],
-                fan=inputs["fan"],
-                design_static_pressure_pa=inputs["design_static_pressure_pa"],
-                delta_t_c=inputs["delta_t_c"],
-                indoor_rh_pct=inputs["indoor_rh_pct"],
-                cooling_pad=inputs["cooling_pad"],
-                outdoor_co2_ppm=inputs["outdoor_co2_ppm"],
-                installed_fan_count=installed if installed > 0 else None,
-                heater_capacity_w=(heater_kw * 1000.0) if heater_kw > 0 else None,
-            )
-        except (ValueError, RuntimeError) as exc:
-            QMessageBox.warning(self, "Could not build schedule", str(exc))
-            return None
-
-        self._render_schedule(result)
-        self._scroll_into_view(self.schedule_notes_label)
-        return result
-
     def _scroll_into_view(self, widget: QWidget) -> None:
         """Scroll the enclosing tab so `widget` is visible.
 
@@ -1677,40 +1198,6 @@ class MainWindow(QMainWindow):
             parent = parent.parentWidget()
         if isinstance(parent, QScrollArea):
             parent.ensureWidgetVisible(widget, 0, 40)
-
-    def _render_schedule(self, result: twin.SimulationResult) -> None:
-        self.schedule_chart.set_schedule(result)
-        self.schedule_chart.setVisible(True)
-        self.schedule_empty_label.setVisible(False)
-
-        step_h = self.step_hours_spin.value()
-        self.schedule_blocks_list.clear()
-        for block in result.blocks:
-            span = (
-                block.start_label
-                if block.n_steps == 1
-                else f"{block.start_label} – {block.end_label}"
-            )
-            hours = block.n_steps * step_h
-            heat = "heat ON" if block.heating_needed else "heat off"
-            self.schedule_blocks_list.addItem(
-                f"{span}   →   {block.fans_on} fan(s), pads "
-                f"{'ON' if block.pads_on else 'off'}, {heat}   ({hours:g} h)"
-            )
-
-        summary = (
-            f"Peak requirement: {result.peak_fans_on} fans.  "
-            f"Total {result.fan_hours(step_h):,.0f} fan-hours, "
-            f"{result.pad_hours(step_h):g} pad-hours."
-        )
-        warnings = [n for n in result.notes if n.startswith("WARNING")]
-        if warnings:
-            self.schedule_notes_label.setStyleSheet(self._banner_style(danger=True))
-            self.schedule_notes_label.setText(summary + "\n\n" + "\n\n".join(f"⚠  {w}" for w in warnings))
-        else:
-            self.schedule_notes_label.setStyleSheet(self._banner_style(danger=False))
-            self.schedule_notes_label.setText(summary)
-        self.schedule_notes_label.setVisible(True)
 
     def export_training_data(self, path: str | None = None,
                              exclude_test: bool = False) -> str | None:
