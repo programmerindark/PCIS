@@ -218,3 +218,23 @@ def test_psychrometric_state_internal_consistency():
 def test_psychrometric_state_repr_does_not_raise():
     state = psy.PsychrometricState(t_c=24.0, rh_pct=55.0)
     assert "PsychrometricState" in repr(state)
+
+
+def test_vpd_matches_definition_and_worked_example():
+    # VPD = e_s(T) * (1 - RH/100), in kPa. At 25.5 C / 93% RH this is
+    # ~0.23 kPa (a standard worked figure for a humid broiler house).
+    assert psy.vapor_pressure_deficit(25.5, 93.0) == pytest.approx(0.23, abs=0.01)
+    expected = psy.saturation_vapor_pressure(30.0) * (1 - 0.45) / 1000.0
+    assert psy.vapor_pressure_deficit(30.0, 45.0) == pytest.approx(expected)
+
+
+def test_vpd_is_zero_at_saturation_and_rises_as_air_dries():
+    assert psy.vapor_pressure_deficit(28.0, 100.0) == pytest.approx(0.0, abs=1e-9)
+    dry = psy.vapor_pressure_deficit(28.0, 30.0)
+    humid = psy.vapor_pressure_deficit(28.0, 80.0)
+    assert dry > humid > 0.0
+
+
+def test_vpd_clamps_out_of_range_humidity():
+    # RH above 100 must not produce a negative deficit.
+    assert psy.vapor_pressure_deficit(28.0, 130.0) == 0.0

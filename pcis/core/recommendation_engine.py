@@ -51,6 +51,7 @@ from pcis.core import comfort_engine as ce
 from pcis.core import heat_moisture_balance as hmb
 from pcis.core import heating as htg
 from pcis.core import psychrometrics as psy
+from pcis.core import target_airspeed as tas
 from pcis.core import ventilation_solver as vs
 from pcis.core import wind_chill as wc
 from pcis.equipment.cooling_pad import CoolingPad, leaving_air_state
@@ -176,6 +177,8 @@ class Recommendation:
     cross_section_area_m2: float | None = None
     air_speed_mps: float | None = None
     effective_temp_c: float | None = None
+    target_airspeed_mps: float | None = None
+    vpd_kpa: float = 0.0
     heating_needed: bool = False
     heat_deficit_w: float = 0.0
     heater_duty_fraction: float | None = None
@@ -346,6 +349,25 @@ def recommend(
     min_ventilation_m3_per_h = min_vent_per_bird * bird_count
     requirements["minimum_ventilation"] = min_ventilation_m3_per_h
 
+    # --- Target tunnel air speed (wind-chill cooling) -------------------
+    # Unlike the felt/effective temperature (which Aviagen says cannot be
+    # calculated, so PCIS only reports it), a target air VELOCITY is a
+    # published operational setpoint and so may legitimately size fans.
+    # When it governs, the fans are staged to move air fast enough over
+    # the birds, not merely to exchange heat. See target_airspeed.py.
+    target_air = tas.recommended_airspeed(
+        body_weight_kg, supply_t_c, target_temp, indoor_rh_pct
+    )
+    if (
+        house_cross_section_m2 is not None
+        and house_cross_section_m2 > 0
+        and target_air.target_mps > 0
+    ):
+        requirements["target_airspeed"] = tas.required_airflow_for_airspeed(
+            target_air.target_mps, house_cross_section_m2
+        )
+        explanation.append(target_air.reason)
+
     # --- Heating (cold-weather / brooding) ------------------------------
     # The cold-weather counterpart of the cooling decision. Uses the same
     # flock heat and envelope loss already computed, plus the heat to warm
@@ -432,10 +454,25 @@ def recommend(
                 f"{indoor_t_c:.1f}C (the effect fades above ~32C and reverses above "
                 "~38C) [Aviagen]."
             )
+        # Young-chick chill guard: the delivered velocity must stay below
+        # the cited 0.15 m/s ceiling for small birds.
+        if target_air.ceiling_mps is not None and air_speed_mps > target_air.ceiling_mps:
+            explanation.append(
+                f"WARNING: delivered air speed {air_speed_mps:.2f} m/s exceeds the "
+                f"{target_air.ceiling_mps:g} m/s young-chick ceiling — risk of chilling "
+                "small birds [Aviagen 2010]. Reduce fan staging or run minimum "
+                "ventilation only."
+            )
 
     # --- Comfort assessment ---------------------------------------------
     w_indoor = psy.humidity_ratio_from_relative_humidity(indoor_t_c, indoor_rh_pct)
     twb_indoor = psy.wet_bulb_temperature(indoor_t_c, w_indoor)
+    vpd_kpa = psy.vapor_pressure_deficit(indoor_t_c, indoor_rh_pct)
+    explanation.append(
+        f"Vapor-pressure deficit (VPD) at {indoor_t_c:.1f}C/{indoor_rh_pct:.0f}% RH = "
+        f"{vpd_kpa:.2f} kPa (air's drying power). Low VPD = humid = weak evaporative "
+        "cooling, so lean on air velocity rather than pads [Cobb; VPD from psychrometrics.py]."
+    )
     comfort = ce.bird_comfort_index(indoor_t_c, twb_indoor, indoor_rh_pct, body_weight_kg)
     confidence -= CONFIDENCE_DEDUCTION_COMPOSITE_COMFORT_INDEX
     explanation.append(
@@ -465,6 +502,12 @@ def recommend(
         cross_section_area_m2=house_cross_section_m2,
         air_speed_mps=air_speed_mps,
         effective_temp_c=effective_temp_c,
+        target_airspeed_mps=(
+            target_air.target_mps
+            if (house_cross_section_m2 and target_air.target_mps > 0)
+            else None
+        ),
+        vpd_kpa=vpd_kpa,
         heating_needed=heat_req.heating_needed,
         heat_deficit_w=heat_req.heat_deficit_w,
         heater_duty_fraction=heat_req.heater_duty_fraction,

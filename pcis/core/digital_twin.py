@@ -275,6 +275,7 @@ def simulate_schedule(
     outdoor_co2_ppm: float = 420.0,
     installed_fan_count: int | None = None,
     heater_capacity_w: float | None = None,
+    house_cross_section_m2: float | None = None,
 ) -> SimulationResult:
     """Simulate fan/pad staging across a sequence of outdoor conditions
     at a fixed bird age -- i.e. "a day in the life" of the house.
@@ -354,6 +355,7 @@ def simulate_schedule(
             cooling_pad=cooling_pad,
             outdoor_co2_ppm=outdoor_co2_ppm,
             heater_capacity_w=heater_capacity_w,
+            house_cross_section_m2=house_cross_section_m2,
         )
         shortfall = installed_fan_count is not None and rec.fans_on > installed_fan_count
         steps.append(
@@ -391,6 +393,7 @@ def simulate_grow_out(
     outdoor_co2_ppm: float = 420.0,
     installed_fan_count: int | None = None,
     heater_capacity_w: float | None = None,
+    house_cross_section_m2: float | None = None,
 ) -> SimulationResult:
     """Simulate staging across a grow-out: same weather, advancing bird
     age -- i.e. "how does my fan requirement grow as the flock does".
@@ -444,6 +447,7 @@ def simulate_grow_out(
             cooling_pad=cooling_pad,
             outdoor_co2_ppm=outdoor_co2_ppm,
             heater_capacity_w=heater_capacity_w,
+            house_cross_section_m2=house_cross_section_m2,
         )
         shortfall = installed_fan_count is not None and rec.fans_on > installed_fan_count
         steps.append(

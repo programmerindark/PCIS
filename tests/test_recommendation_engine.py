@@ -344,11 +344,29 @@ def test_delivered_airflow_is_at_least_the_requirement():
     assert r.delivered_airflow_m3_per_h >= r.required_airflow_m3_per_h
 
 
+def _recommend_mild(cross_section, fan_idx=1):
+    # Cool weather so the target-airspeed constraint does NOT govern (no
+    # wind-chill cooling wanted): the airflow requirement is then
+    # independent of cross-section, isolating the continuity relationship.
+    return re.recommend(
+        bird_count=20000, body_weight_kg=2.5,
+        indoor_t_c=21.0, indoor_rh_pct=60.0,
+        outdoor_t_c=10.0, outdoor_rh_pct=60.0,
+        envelope_surfaces=SURFACES, fan=FAN_CATALOG[fan_idx],
+        design_static_pressure_pa=30.0, delta_t_c=3.0,
+        cooling_pad=None, house_cross_section_m2=cross_section,
+    )
+
+
 def test_narrower_house_gives_higher_air_speed_for_same_conditions():
     # The whole reason cross-section matters: identical everything except
-    # a smaller tunnel profile must produce a faster air speed.
-    wide = _recommend(cross_section=60.0)
-    narrow = _recommend(cross_section=30.0)
+    # a smaller tunnel profile must produce a faster air speed -- checked
+    # in mild weather where velocity is not the governing constraint (in
+    # heat, PCIS instead sizes fans TO a target velocity; see
+    # tests/test_target_airspeed.py).
+    wide = _recommend_mild(cross_section=60.0)
+    narrow = _recommend_mild(cross_section=30.0)
+    assert narrow.governing_constraint != "target_airspeed"
     assert narrow.air_speed_mps > wide.air_speed_mps
     # And it should scale inversely with area (same delivered airflow).
     if wide.delivered_airflow_m3_per_h == narrow.delivered_airflow_m3_per_h:

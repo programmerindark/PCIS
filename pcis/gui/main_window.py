@@ -83,12 +83,14 @@ from pcis.gui.widgets import (
     EnvelopeSurfaceEditor,
     SI_ROLE,
     UnitAwareSpinBox,
+    WeatherProfileTable,
     _cell_si_value,
     _hint,
     _scrollable,
     _si_cell,
 )
 from pcis.gui.guided import GuidedScheduleWidget
+from pcis.gui import guided_model as gm
 from pcis import config, logging_setup, paths, update_service, version
 from pcis.gui.charts import ComfortChartWidget, FanCurveChartWidget
 from pcis.reports.pdf_report import generate_recommendation_report
@@ -506,6 +508,8 @@ class MainWindow(QMainWindow):
         self.envelope_editor.set_unit_system(system)
         # The guided page owns its own inputs; let it convert them too.
         self.guided.set_unit_system(system)
+        # The Recommendation tab's day-schedule weather profile too.
+        self.rec_profile.set_unit_system(system)
         self._refresh_fan_chart()
         # Re-render the last result so its units follow the selector too.
         if self._last_result is not None and self._last_inputs is not None:
@@ -573,8 +577,9 @@ class MainWindow(QMainWindow):
         env_layout = QVBoxLayout(envelope_group)
         env_layout.addWidget(
             _hint(
-                "Used for conduction heat loss/gain (Q = U·A·ΔT). U-values are caller-supplied: "
-                "PCIS has no verified materials table and will not guess one for you."
+                "Used for conduction heat loss/gain (Q = U·A·ΔT). Don't know your U-values? Pick "
+                "a typical construction from the “Add a typical surface” dropdown to fill a cited "
+                "default; override it if you know your own."
             )
         )
         self.envelope_editor = EnvelopeSurfaceEditor()
@@ -828,6 +833,87 @@ class MainWindow(QMainWindow):
         self.explanation_list.setMinimumHeight(240)
         expl_layout.addWidget(self.explanation_list)
         layout.addWidget(expl_group, stretch=3)
+
+        # --- Day schedule -----------------------------------------------
+        # The single result above answers "what to run right now"; this
+        # answers "what to run through the day". It runs the same engine
+        # (via the digital twin) at each outdoor condition you enter,
+        # using the detailed inputs from the other tabs, and collapses the
+        # day into fan/pad/heater blocks.
+        schedule_group = QGroupBox("Day schedule")
+        sched_layout = QVBoxLayout(schedule_group)
+        sched_layout.addWidget(
+            _hint(
+                "Enter the outdoor temperature and humidity through the day; PCIS returns how "
+                "many fans, and whether pads and heaters are on, at each time — collapsed into "
+                "blocks. (Automatic weather-forecast fetching is planned; for now these are "
+                "your readings.)"
+            )
+        )
+        self.rec_profile = WeatherProfileTable()
+        sched_layout.addWidget(self.rec_profile)
+
+        sched_settings = QHBoxLayout()
+        self.rec_installed_fans = QSpinBox()
+        self.rec_installed_fans.setRange(0, 200)
+        self.rec_installed_fans.setValue(8)
+        self.rec_installed_fans.setSpecialValueText("(not specified)")
+        self.rec_installed_fans.setToolTip(
+            "How many fans you physically have. Used only to flag a shortfall; the required "
+            "count is never capped to it."
+        )
+        self.rec_heater_kw = QDoubleSpinBox()
+        self.rec_heater_kw.setRange(0.0, 2000.0)
+        self.rec_heater_kw.setValue(0.0)
+        self.rec_heater_kw.setSuffix(" kW")
+        self.rec_heater_kw.setDecimals(1)
+        self.rec_heater_kw.setSpecialValueText("(none)")
+        self.rec_heater_kw.setToolTip(
+            "Total installed heater capacity, to turn a heating requirement into an on-time. "
+            "Leave at 0 to just see whether heat is needed."
+        )
+        self.rec_step_hours = QDoubleSpinBox()
+        self.rec_step_hours.setRange(0.25, 24.0)
+        self.rec_step_hours.setValue(3.0)
+        self.rec_step_hours.setSuffix(" h")
+        self.rec_step_hours.setDecimals(2)
+        self.rec_step_hours.setToolTip("How much time each row represents (for the hour totals).")
+        sched_settings.addWidget(QLabel("Fans installed:"))
+        sched_settings.addWidget(self.rec_installed_fans)
+        sched_settings.addWidget(QLabel("Heater:"))
+        sched_settings.addWidget(self.rec_heater_kw)
+        sched_settings.addWidget(QLabel("Time per row:"))
+        sched_settings.addWidget(self.rec_step_hours)
+        sched_settings.addStretch(1)
+        sched_layout.addLayout(sched_settings)
+
+        build_sched_btn = QPushButton("Build day schedule")
+        build_sched_btn.setProperty("primary", True)
+        build_sched_btn.clicked.connect(self.run_day_schedule)
+        sched_layout.addWidget(build_sched_btn)
+
+        self.rec_schedule_summary = QLabel()
+        self.rec_schedule_summary.setWordWrap(True)
+        self.rec_schedule_summary.setVisible(False)
+        sched_layout.addWidget(self.rec_schedule_summary)
+
+        self.rec_schedule_empty = _hint(
+            "Press “Build day schedule” to plan fans, pads and heaters across the day."
+        )
+        self.rec_schedule_empty.setAlignment(Qt.AlignCenter)
+        sched_layout.addWidget(self.rec_schedule_empty)
+
+        self.rec_schedule_blocks = QListWidget()
+        self.rec_schedule_blocks.setWordWrap(True)
+        self.rec_schedule_blocks.setMinimumHeight(140)
+        self.rec_schedule_blocks.setVisible(False)
+        sched_layout.addWidget(self.rec_schedule_blocks)
+
+        self.rec_schedule_notes = QLabel()
+        self.rec_schedule_notes.setWordWrap(True)
+        self.rec_schedule_notes.setVisible(False)
+        sched_layout.addWidget(self.rec_schedule_notes)
+        layout.addWidget(schedule_group, stretch=2)
 
         self.test_run_checkbox = QCheckBox("Log this as a test run (kept out of the real dataset)")
         self.test_run_checkbox.setToolTip(
@@ -1185,6 +1271,83 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self, "history_table"):
             self._refresh_history()
+
+    def run_day_schedule(self) -> "twin.SimulationResult | None":
+        """Build a full-day fan/pad/heater schedule on the Recommendation
+        tab, using the detailed inputs from the other tabs plus the
+        entered outdoor-conditions profile. Runs the same engine as the
+        single recommendation, once per timepoint, via the digital twin.
+        """
+        try:
+            rows = self.rec_profile.rows()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid weather input", str(exc))
+            return None
+        if not rows:
+            QMessageBox.warning(
+                self, "No weather entered", "Add at least one time row to the day schedule."
+            )
+            return None
+        try:
+            inputs = self.gather_inputs()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid input", str(exc))
+            return None
+
+        conditions = [twin.OutdoorCondition(label=lbl, t_c=t, rh_pct=rh) for lbl, t, rh in rows]
+        installed = self.rec_installed_fans.value()
+        heater_kw = self.rec_heater_kw.value()
+        try:
+            result = twin.simulate_schedule(
+                conditions=conditions,
+                age_days=float(inputs["age_days"]),
+                bird_count=inputs["bird_count"],
+                envelope_surfaces=inputs["surfaces"],
+                fan=inputs["fan"],
+                design_static_pressure_pa=inputs["design_static_pressure_pa"],
+                delta_t_c=inputs["delta_t_c"],
+                indoor_rh_pct=inputs["indoor_rh_pct"],
+                cooling_pad=inputs["cooling_pad"],
+                outdoor_co2_ppm=inputs["outdoor_co2_ppm"],
+                installed_fan_count=installed if installed > 0 else None,
+                heater_capacity_w=(heater_kw * 1000.0) if heater_kw > 0 else None,
+                house_cross_section_m2=inputs["width_m"] * inputs["height_m"],
+            )
+        except (ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Could not build schedule", str(exc))
+            return None
+
+        self._render_day_schedule(result)
+        self._scroll_into_view(self.rec_schedule_blocks)
+        return result
+
+    def _render_day_schedule(self, result: "twin.SimulationResult") -> None:
+        step_h = self.rec_step_hours.value()
+        self.rec_schedule_blocks.clear()
+        for block in result.blocks:
+            self.rec_schedule_blocks.addItem(gm.describe_block(block, step_h))
+        self.rec_schedule_empty.setVisible(False)
+        self.rec_schedule_blocks.setVisible(True)
+
+        summ = gm.summarize(result, step_h)
+        parts = [
+            f"Peak {summ.peak_fans_on} fans",
+            f"{summ.fan_hours:g} fan-hours over {summ.total_hours:g} h",
+        ]
+        if summ.pad_hours > 0:
+            parts.append(f"pads {summ.pad_hours:g} h")
+        if summ.heating_hours > 0:
+            parts.append(f"heat {summ.heating_hours:g} h")
+        self.rec_schedule_summary.setText("  •  ".join(parts))
+        self.rec_schedule_summary.setVisible(True)
+
+        warnings = [n for n in result.notes if n.startswith(("WARNING", "HEATING"))]
+        if warnings:
+            self.rec_schedule_notes.setStyleSheet(self._banner_style(danger=True))
+            self.rec_schedule_notes.setText("\n\n".join(f"⚠  {w}" for w in warnings))
+            self.rec_schedule_notes.setVisible(True)
+        else:
+            self.rec_schedule_notes.setVisible(False)
 
     def _scroll_into_view(self, widget: QWidget) -> None:
         """Scroll the enclosing tab so `widget` is visible.

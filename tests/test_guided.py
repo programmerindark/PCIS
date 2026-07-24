@@ -195,3 +195,41 @@ def test_gather_returns_si_values(guided):
     assert inputs["bird_count"] == guided.bird_count_spin.value()
     assert inputs["indoor_rh_pct"] == guided.indoor_rh_spin.value()
     assert inputs["surfaces"]  # non-empty envelope seeded
+
+
+def test_envelope_seeded_with_cited_preset_u_values(guided):
+    from pcis.core import envelope_presets as ep
+
+    surfaces = guided.envelope_editor.surfaces()
+    assert surfaces[0].u_value == ep.DEFAULT_WALL.u_value
+    assert surfaces[1].u_value == ep.DEFAULT_CEILING.u_value
+
+
+def test_build_shows_bird_status_dashboard(guided):
+    guided.build_schedule()
+    assert guided.status_group.isVisible() or not guided.status_group.isHidden()
+    # The dashboard grid has been populated (comfort/risk/... rows).
+    assert guided.status_grid.count() >= 6
+
+
+def test_airspeed_constraint_flows_into_the_schedule(guided):
+    # Grown birds + hot default profile + a real cross-section: at least
+    # one step should have the target-airspeed velocity recommended.
+    guided.age_spin.setValue(35)
+    result = guided.build_schedule()
+    assert any(
+        st.recommendation.target_airspeed_mps == 3.0 for st in result.steps
+    )
+
+
+def test_construction_picker_inserts_a_row_with_cited_u(guided):
+    from pcis.core import envelope_presets as ep
+
+    editor = guided.envelope_editor
+    before = editor.table.rowCount()
+    target = ep.by_label("Well-insulated ceiling (R-30)")
+    idx = editor.preset_combo.findText(target.label)
+    editor.preset_combo.setCurrentIndex(idx)
+    editor._add_preset_row()
+    assert editor.table.rowCount() == before + 1
+    assert editor.surfaces()[-1].u_value == target.u_value

@@ -92,6 +92,40 @@ def saturation_vapor_pressure(t_c: float) -> float:
     return es_hpa * 100.0
 
 
+def vapor_pressure_deficit(t_c: float, rh_pct: float) -> float:
+    """Air vapor-pressure deficit (VPD), kPa.
+
+    VPD is the gap between the saturation vapor pressure at the air
+    temperature and the actual vapor pressure:
+
+        VPD = e_s(T) * (1 - RH/100)
+
+    It measures the air's evaporative demand (drying power). For broilers
+    it is a more direct signal than relative humidity of how readily the
+    birds can shed heat by panting/evaporation, and of how well the
+    house's evaporative pads can work: a LOW VPD (humid air) means
+    evaporative cooling is weak -- exactly the high-humidity case where
+    air velocity, not pad cooling, has to do the work [Cobb]. Standard
+    definition; e_s from `saturation_vapor_pressure` (Buck 1996), so this
+    adds no new constants.
+
+    Parameters
+    ----------
+    t_c : float
+        Dry-bulb air temperature, C.
+    rh_pct : float
+        Relative humidity, % (clamped to [0, 100]).
+
+    Returns
+    -------
+    float
+        VPD, kPa (always >= 0).
+    """
+    rh = max(0.0, min(100.0, rh_pct))
+    vpd_pa = saturation_vapor_pressure(t_c) * (1.0 - rh / 100.0)
+    return max(0.0, vpd_pa) / 1000.0
+
+
 def dew_point_temperature(
     pw_pa: float, tolerance_c: float = 1e-6, max_iterations: int = 100
 ) -> float:

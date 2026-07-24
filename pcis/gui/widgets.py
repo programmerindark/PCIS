@@ -19,6 +19,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pcis.core import envelope_presets as ep
 from pcis.core import heat_moisture_balance as hmb
 from pcis.gui import units
 
@@ -221,8 +223,30 @@ class EnvelopeSurfaceEditor(QWidget):
         self.table.setMinimumHeight(140)
         layout.addWidget(self.table)
 
+        # Most operators do not know their wall/ceiling U-value. This
+        # picker lets them insert a surface by construction TYPE instead;
+        # the U-value is a cited default from `envelope_presets` that
+        # they can still edit. See that module for the sources.
+        preset_row = QHBoxLayout()
+        preset_hint = QLabel("Don't know your U-value? Add a typical surface:")
+        preset_hint.setProperty("hint", True)
+        self.preset_combo = QComboBox()
+        for preset in ep.ENVELOPE_PRESETS:
+            self.preset_combo.addItem(preset.label, preset)
+        self.preset_combo.setToolTip(
+            "Pick a construction type to insert a surface with a cited default "
+            "U-value (from published poultry-housing R-values). Edit it afterwards "
+            "if you know your own."
+        )
+        insert_btn = QPushButton("Add")
+        insert_btn.clicked.connect(self._add_preset_row)
+        preset_row.addWidget(preset_hint)
+        preset_row.addWidget(self.preset_combo, 1)
+        preset_row.addWidget(insert_btn)
+        layout.addLayout(preset_row)
+
         buttons = QHBoxLayout()
-        add_btn = QPushButton("Add surface")
+        add_btn = QPushButton("Add blank row")
         add_btn.clicked.connect(lambda: self.add_row())
         remove_btn = QPushButton("Remove selected")
         remove_btn.clicked.connect(self.remove_selected)
@@ -231,10 +255,11 @@ class EnvelopeSurfaceEditor(QWidget):
         buttons.addStretch(1)
         layout.addLayout(buttons)
 
-        # Seed with two typical rows the user can edit rather than
-        # starting from a totally blank table.
-        self.add_row("sidewalls", 0.6, 350.0)
-        self.add_row("ceiling", 0.4, 1500.0)
+        # Seed with two typical, CITED rows (an insulated, heated broiler
+        # house) the user can edit rather than starting blank or from
+        # uncited guesses. Values come from `envelope_presets`.
+        self.add_row(ep.DEFAULT_WALL.default_name, ep.DEFAULT_WALL.u_value, 350.0)
+        self.add_row(ep.DEFAULT_CEILING.default_name, ep.DEFAULT_CEILING.u_value, 1500.0)
 
     def _refresh_headers(self) -> None:
         s = self._system
@@ -274,6 +299,18 @@ class EnvelopeSurfaceEditor(QWidget):
         self.table.setItem(row, 1, _si_cell(self._system.u_value_from_si(u_value), u_value))
         self.table.setItem(row, 2, _si_cell(self._system.area_from_si(area_m2), area_m2))
 
+    def _add_preset_row(self) -> None:
+        """Insert a row for the construction type chosen in the picker,
+        pre-filling its cited U-value. Area defaults to a rough figure
+        the operator should correct to their own house."""
+        preset = self.preset_combo.currentData()
+        if preset is None:
+            return
+        # Ceilings cover the whole footprint; walls a smaller strip.
+        # These are only starting areas -- the user edits them.
+        default_area = 1000.0 if "ceiling" in preset.default_name else 200.0
+        self.add_row(preset.default_name, preset.u_value, default_area)
+
     def remove_selected(self) -> None:
         for index in sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True):
             self.table.removeRow(index)
@@ -296,3 +333,113 @@ class EnvelopeSurfaceEditor(QWidget):
                 raise ValueError(f"Row {row + 1} ({name}): U-value and area must be numbers") from exc
             result.append(hmb.Surface(name=name, u_value=u_si, area_m2=area_si))
         return result
+
+
+class WeatherProfileTable(QWidget):
+    """Editable table of outdoor conditions through the day: time,
+    outdoor temperature, outdoor relative humidity.
+
+    Reusable across the app (the guided page and the Recommendation
+    tab). Temperatures are stored in SI (Celsius) and converted only for
+    display, matching the rest of PCIS; `rows()` always returns SI. The
+    time label is opaque free text, so "06:00", "dawn", or "step 3" all
+    work. PCIS ships a starting example curve but no built-in weather
+    model -- a defensible curve is site- and season-specific, so these
+    are the operator's own readings.
+    """
+
+    #: A starting example day the user can edit (SI Celsius / % RH).
+    DEFAULT_ROWS = [
+        ("00:00", 24.0, 80.0), ("03:00", 22.0, 85.0), ("06:00", 21.0, 85.0),
+        ("09:00", 28.0, 60.0), ("12:00", 34.0, 45.0), ("15:00", 37.0, 38.0),
+        ("18:00", 34.0, 45.0), ("21:00", 28.0, 65.0),
+    ]
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._system = units.METRIC
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(90)
+        self.table.setAlternatingRowColors(True)
+        self.table.setMinimumHeight(200)
+        self._refresh_headers()
+        layout.addWidget(self.table)
+
+        buttons = QHBoxLayout()
+        add_btn = QPushButton("Add time")
+        add_btn.clicked.connect(lambda: self.add_row("12:00", 30.0, 50.0))
+        remove_btn = QPushButton("Remove selected")
+        remove_btn.clicked.connect(self._remove_selected)
+        buttons.addWidget(add_btn)
+        buttons.addWidget(remove_btn)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        for label, t_c, rh in self.DEFAULT_ROWS:
+            self.add_row(label, t_c, rh)
+        self.table.resizeColumnsToContents()
+        for col in range(self.table.columnCount() - 1):
+            self.table.setColumnWidth(col, max(self.table.columnWidth(col) + 24, 120))
+
+    def _refresh_headers(self) -> None:
+        s = self._system
+        self.table.setHorizontalHeaderLabels(
+            ["Time", f"Outdoor temp ({s.temp_suffix.strip()})", "Outdoor RH (%)"]
+        )
+
+    def add_row(self, label: str, t_c: float, rh_pct: float) -> None:
+        """Add a row. `t_c` is SI (Celsius); displayed converted."""
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(label))
+        self.table.setItem(row, 1, _si_cell(self._system.temp_from_si(t_c), t_c))
+        self.table.setItem(row, 2, QTableWidgetItem(f"{rh_pct:g}"))
+
+    def _remove_selected(self) -> None:
+        for index in sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True):
+            self.table.removeRow(index)
+
+    def set_unit_system(self, system: units.UnitSystem) -> None:
+        """Re-display temperatures in `system`, converting (not
+        reinterpreting) the values already entered."""
+        raw = self._read_rows(strict=False)
+        self._system = system
+        self._refresh_headers()
+        self.table.setRowCount(0)
+        for label, t_c, rh in raw:
+            self.add_row(label, t_c, rh)
+
+    def _read_rows(self, strict: bool) -> list[tuple[str, float, float]]:
+        rows: list[tuple[str, float, float]] = []
+        for row in range(self.table.rowCount()):
+            label_item = self.table.item(row, 0)
+            t_item = self.table.item(row, 1)
+            rh_item = self.table.item(row, 2)
+            label = label_item.text() if label_item else f"step {row + 1}"
+            try:
+                t_c = _cell_si_value(t_item, self._system.temp_to_si)
+                rh = float(rh_item.text()) if rh_item else 0.0
+            except ValueError as exc:
+                if strict:
+                    raise ValueError(
+                        f"Row {row + 1} ({label}): temperature and humidity must be numbers"
+                    ) from exc
+                t_c, rh = 0.0, 0.0
+            rows.append((label, t_c, rh))
+        return rows
+
+    def rows(self) -> list[tuple[str, float, float]]:
+        """Validated (label, temp_c_SI, rh_pct) for each row, in order.
+
+        Raises ValueError (for the caller to surface) if any cell is not
+        a number.
+        """
+        return self._read_rows(strict=True)

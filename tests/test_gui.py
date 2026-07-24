@@ -47,10 +47,14 @@ def window(qapp):
 
 
 def test_envelope_editor_default_rows_round_trip(qapp):
+    from pcis.core import envelope_presets as ep
+
     editor = EnvelopeSurfaceEditor()
     surfaces = editor.surfaces()
     assert [s.name for s in surfaces] == ["sidewalls", "ceiling"]
-    assert surfaces[0].u_value == 0.6
+    # Seeded from the cited preset catalogue, not uncited guesses.
+    assert surfaces[0].u_value == ep.DEFAULT_WALL.u_value
+    assert surfaces[1].u_value == ep.DEFAULT_CEILING.u_value
     assert surfaces[1].area_m2 == 1500.0
 
 
@@ -459,6 +463,23 @@ def test_installed_fan_shortfall_surfaces_in_the_notes(window):
     assert "WARNING" in window.guided.notes_label.text()
 
 
+def test_recommendation_tab_day_schedule_populates_blocks(window):
+    result = window.run_day_schedule()
+    assert result is not None
+    assert len(result.steps) == window.rec_profile.table.rowCount()
+    assert window.rec_schedule_blocks.count() == len(result.blocks)
+    assert not window.rec_schedule_blocks.isHidden()
+    assert not window.rec_schedule_summary.isHidden()
+
+
+def test_recommendation_tab_day_schedule_empty_warns(window):
+    window.rec_profile.table.setRowCount(0)
+    with patch.object(QMessageBox, "warning", return_value=QMessageBox.Ok) as mock_warn:
+        result = window.run_day_schedule()
+    assert result is None
+    mock_warn.assert_called_once()
+
+
 def test_comfort_chart_follows_the_unit_selector(window):
     # The chart showing Celsius while the header showed Fahrenheit was
     # worse than no chart: both numbers look authoritative.
@@ -515,18 +536,23 @@ def test_module_calls_main_when_run_as_a_script():
 
 
 def test_metrics_reflow_to_fewer_columns_when_narrow(window):
-    # At 940px wide, five equal columns rendered "GOVERNING CONSTRAINT"
-    # and "CONFIDENCE" with zero gap between them.
+    # Equal columns at a narrow width crowded long captions ("GOVERNING
+    # CONSTRAINT"/"CONFIDENCE") together; the panel must instead reflow.
+    # Count-agnostic so adding metrics (air speed, heating, ...) can't
+    # silently break this — given enough room every metric fits on one
+    # row; squeezed, it wraps to fewer but never zero.
     panel = window.metrics_panel
-    wide = panel.columns_for_width(1400)
-    narrow = panel.columns_for_width(600)
-    assert wide == 5, "all five metrics should sit on one row when there is room"
+    n = len(panel._cells)
+    plenty = n * (panel.MIN_COLUMN_PX + panel._grid.horizontalSpacing()) + 50
+    wide = panel.columns_for_width(plenty)
+    narrow = panel.columns_for_width(panel.MIN_COLUMN_PX * 2)
+    assert wide == n, "every metric should sit on one row when there is room"
     assert narrow < wide, "must reflow to fewer columns when the window is narrow"
     assert narrow >= 1
 
     # And the wiring actually applies it.
     panel.apply_width(600)
-    assert panel._columns == narrow
+    assert panel._columns == panel.columns_for_width(600)
 
 
 def test_every_metric_cell_meets_its_minimum_width(window):

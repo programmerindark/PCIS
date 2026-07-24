@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
 )
 
+from pcis.core import bird_status as bs
 from pcis.core import digital_twin as twin
 from pcis.core import growth_curve as gc
 from pcis.equipment.cooling_pad import COOLING_PAD_CATALOG, CoolingPad
@@ -350,9 +352,10 @@ class GuidedScheduleWidget(QWidget):
         outer.addWidget(
             _hint(
                 "Envelope surfaces below drive conduction heat loss/gain (Q = U·A·ΔT), which "
-                "matters most for the heating requirement. U-values are yours to supply — PCIS "
-                "has no verified materials table and will not guess one. Make the areas match "
-                "the house dimensions above."
+                "matters most for the heating requirement. Don't know your U-values? Use the "
+                "“Add a typical surface” picker to insert a cited default for common "
+                "constructions (insulated wall, ceiling, etc.), then just set the areas to "
+                "match your house. Override any U-value if you know your own."
             )
         )
         self.envelope_editor = EnvelopeSurfaceEditor()
@@ -490,6 +493,26 @@ class GuidedScheduleWidget(QWidget):
         self.blocks_list.setVisible(False)
         sg_layout.addWidget(self.blocks_list)
         layout.addWidget(schedule_group)
+
+        # --- Bird status dashboard (worst step of the day) --------------
+        self.status_group = QGroupBox("Bird status — worst point of the day")
+        st_layout = QVBoxLayout(self.status_group)
+        st_layout.addWidget(
+            _hint(
+                "How the birds are likely to be doing at the hottest step you entered. "
+                "Comfort and heat-stress risk reuse PCIS's cited comfort index / THI; felt "
+                "temperature, panting and water are ESTIMATES (see the notes below the chart)."
+            )
+        )
+        status_host = QWidget()
+        self.status_grid = QGridLayout(status_host)
+        self.status_grid.setContentsMargins(0, 4, 0, 0)
+        self.status_grid.setHorizontalSpacing(16)
+        self.status_grid.setVerticalSpacing(4)
+        self.status_grid.setColumnStretch(1, 1)
+        st_layout.addWidget(status_host)
+        self.status_group.setVisible(False)
+        layout.addWidget(self.status_group)
 
         chart_group = QGroupBox("Day-wise target house temperature (Aviagen Ross 308)")
         cg_layout = QVBoxLayout(chart_group)
@@ -666,6 +689,11 @@ class GuidedScheduleWidget(QWidget):
                 cooling_pad=inputs["cooling_pad"],
                 installed_fan_count=inputs["installed_fan_count"],
                 heater_capacity_w=inputs["heater_capacity_w"],
+                # Cross-section = width x eave height. Lets the target
+                # tunnel air-velocity constraint size fans, and gives the
+                # per-step air speed / felt temperature the bird-status
+                # dashboard reads.
+                house_cross_section_m2=inputs["width_m"] * inputs["height_m"],
             )
         except (ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Could not build schedule", str(exc))
@@ -719,6 +747,9 @@ class GuidedScheduleWidget(QWidget):
         self.summary_label.setText(summary_html)
         self.summary_label.setVisible(True)
 
+        # --- bird status dashboard --------------------------------------
+        self._render_bird_status(result)
+
         # --- honesty notes verbatim -------------------------------------
         if result.notes:
             joined = "<br>".join(
@@ -733,3 +764,72 @@ class GuidedScheduleWidget(QWidget):
             self.notes_label.setVisible(True)
         else:
             self.notes_label.setVisible(False)
+
+    def _airspeed_text(self, mps: float | None) -> str:
+        if mps is None:
+            return "—"
+        if self._system is units.IMPERIAL:
+            return f"{mps * 196.85:.0f} ft/min"
+        return f"{mps:.2f} m/s"
+
+    def _render_bird_status(self, result: twin.SimulationResult) -> None:
+        """Show how the birds are likely doing at the worst (least-
+        comfortable) step of the entered day."""
+        pal = style.active()
+        s = self._system
+        if not result.steps:
+            self.status_group.setVisible(False)
+            return
+        # Worst = hottest air the birds actually get (highest supply-air
+        # temperature), and status is evaluated at that realistic indoor
+        # temperature, not the optimistic target -- see bird_status.
+        worst = max(result.steps, key=lambda st: st.recommendation.supply_air_t_c)
+        rec = worst.recommendation
+        status = bs.from_recommendation(rec)
+
+        risk_color = {"Low": pal["OK"], "Moderate": pal["WARN"], "High": pal["DANGER"]}.get(
+            status.heat_stress_risk, pal["INK"]
+        )
+        comfort_color = (
+            pal["OK"] if status.comfort_label == "Good"
+            else pal["WARN"] if status.comfort_label == "Fair"
+            else pal["DANGER"]
+        )
+
+        # Clear any previous rows.
+        while self.status_grid.count():
+            item = self.status_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        self._status_row = 0
+
+        def row(key: str, value: str, color: str | None = None, est: bool = False) -> None:
+            k = QLabel(key)
+            k.setProperty("hint", True)
+            v = QLabel(value + ("   (est.)" if est else ""))
+            v.setTextFormat(Qt.PlainText)
+            if color:
+                v.setStyleSheet(f"color:{color}; font-weight:600;")
+            r = self._status_row
+            self.status_grid.addWidget(k, r, 0, Qt.AlignLeft | Qt.AlignTop)
+            self.status_grid.addWidget(v, r, 1, Qt.AlignLeft | Qt.AlignTop)
+            self._status_row = r + 1
+
+        row("Worst step", f"{worst.label} (outdoor {s.temp_from_si(worst.outdoor_t_c):.0f}{s.temp_suffix})")
+        row("Bird comfort", f"{status.comfort_score:.0f}/100 ({status.comfort_label})", comfort_color)
+        row("Heat-stress risk", status.heat_stress_risk, risk_color)
+        if status.effective_bird_temp_c is not None:
+            row("Effective bird temp",
+                f"{s.temp_from_si(status.effective_bird_temp_c):.1f}{s.temp_suffix}", est=True)
+        row("Panting index", status.panting_index, est=True)
+        if status.water_intake_multiplier > 1.0:
+            row("Water intake", f"~{status.water_intake_multiplier:.1f}x thermoneutral", est=True)
+        row("VPD", f"{rec.vpd_kpa:.2f} kPa")
+        if rec.target_airspeed_mps:
+            row("Target air speed",
+                f"{self._airspeed_text(rec.target_airspeed_mps)} "
+                f"(predicted {self._airspeed_text(rec.air_speed_mps)})")
+
+        self.status_group.setVisible(True)
