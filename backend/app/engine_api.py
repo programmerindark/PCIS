@@ -10,12 +10,14 @@ on the web without being re-derived.
 
 from __future__ import annotations
 
+from pcis.core import advisor as adv
 from pcis.core import bird_status as bs
 from pcis.core import comfort_engine as ce
 from pcis.core import digital_twin as twin
 from pcis.core import envelope_presets as ep
 from pcis.core import growth_curve as gc
 from pcis.core import heat_moisture_balance as hmb
+from pcis.core import mortality as mort
 from pcis.core import recommendation_engine as re
 from pcis.equipment.cooling_pad import COOLING_PAD_CATALOG
 from pcis.equipment.fan_curve import FAN_CATALOG
@@ -113,9 +115,8 @@ def _rec_dict(rec: re.Recommendation) -> dict:
     }
 
 
-def recommend(payload) -> dict:
-    """Single-moment recommendation. `payload` is a validated request
-    model with attribute access (Pydantic)."""
+def _recommend_obj(payload):
+    """Build the engine Recommendation from a request payload."""
     weight = gc.ross_308_body_weight_kg(float(payload.bird_age_days))
     indoor_t = ce.target_temperature(weight, payload.indoor_rh_pct)
     rec = re.recommend(
@@ -133,9 +134,50 @@ def recommend(payload) -> dict:
         house_cross_section_m2=payload.width_m * payload.height_m,
         heater_capacity_w=(payload.heater_kw * 1000.0) if payload.heater_kw > 0 else None,
     )
+    return rec, weight
+
+
+def recommend(payload) -> dict:
+    """Single-moment recommendation. `payload` is a validated request
+    model with attribute access (Pydantic)."""
+    rec, weight = _recommend_obj(payload)
     out = _rec_dict(rec)
     out["body_weight_kg"] = round(weight, 3)
     return out
+
+
+def mortality(payload) -> dict:
+    """Assess a flock's mortality against the cited EU benchmark."""
+    a = mort.assess(payload.placed, payload.cumulative_dead, payload.age_days, payload.dead_today)
+    return {
+        "live_count": a.live_count,
+        "cumulative_dead": a.cumulative_dead,
+        "cumulative_pct": a.cumulative_pct,
+        "acceptable_pct": a.acceptable_pct,
+        "within_target": a.within_target,
+        "elevated_today": a.elevated_today,
+        "daily_pct": a.daily_pct,
+        "note": a.note,
+    }
+
+
+def advise(payload) -> dict:
+    """The AI Advisor: one prioritised action + its predicted effect."""
+    rec, _ = _recommend_obj(payload)
+    a = adv.advise(rec, installed_fans=payload.installed_fans, pads_installed=payload.cooling_pads)
+    return {
+        "category": a.category,
+        "headline": a.headline,
+        "detail": a.detail,
+        "why": a.why,
+        "confidence": round(a.confidence, 0),
+        "feel_before_c": round(a.feel_before_c, 1) if a.feel_before_c is not None else None,
+        "feel_after_c": round(a.feel_after_c, 1) if a.feel_after_c is not None else None,
+        "panting_before": a.panting_before,
+        "panting_after": a.panting_after,
+        "comfort_score": round(a.comfort_score, 0),
+        "heat_stress_risk": a.heat_stress_risk,
+    }
 
 
 def schedule(payload) -> dict:

@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app import engine_api
-from backend.app.schemas import RecommendRequest, ScheduleRequest
+from backend.app.schemas import MortalityRequest, RecommendRequest, ScheduleRequest
 
 app = FastAPI(
     title="PCIS API",
@@ -73,3 +73,15 @@ def recommend(req: RecommendRequest) -> dict:
 def schedule(req: ScheduleRequest) -> dict:
     """Full-day fan/pad/heater schedule from an entered weather profile."""
     return engine_api.schedule(req)
+
+
+@app.post("/advise")
+def advise(req: RecommendRequest) -> dict:
+    """AI Advisor: the single most important action + its predicted effect."""
+    return engine_api.advise(req)
+
+
+@app.post("/mortality")
+def mortality(req: MortalityRequest) -> dict:
+    """Assess flock mortality vs the cited EU cumulative-mortality ceiling."""
+    return engine_api.mortality(req)

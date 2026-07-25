@@ -41,3 +41,10 @@ class WeatherPoint(BaseModel):
 class ScheduleRequest(HouseFlockInputs):
     profile: list[WeatherPoint] = Field(min_length=1)
     step_hours: float = Field(gt=0, le=24, default=3.0)
+
+
+class MortalityRequest(BaseModel):
+    placed: int = Field(gt=0)
+    cumulative_dead: int = Field(ge=0)
+    age_days: float = Field(ge=0, le=56)
+    dead_today: int = Field(ge=0, default=0)

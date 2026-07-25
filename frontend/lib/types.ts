@@ -100,3 +100,28 @@ export type ScheduleResponse = {
 
 export type Severity = "info" | "warning" | "critical";
 export type Alert = { severity: Severity; title: string; message: string };
+
+export type MortalityResponse = {
+  live_count: number;
+  cumulative_dead: number;
+  cumulative_pct: number;
+  acceptable_pct: number;
+  within_target: boolean;
+  elevated_today: boolean;
+  daily_pct: number;
+  note: string;
+};
+
+export type AdviseResponse = {
+  category: string;
+  headline: string;
+  detail: string;
+  why: string;
+  confidence: number;
+  feel_before_c: number | null;
+  feel_after_c: number | null;
+  panting_before: string;
+  panting_after: string;
+  comfort_score: number;
+  heat_stress_risk: string;
+};

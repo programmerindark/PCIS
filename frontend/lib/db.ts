@@ -61,6 +61,22 @@ export async function createHouse(farmId: string, h: NewHouse): Promise<House> {
   return data as House;
 }
 
+export async function updateHouse(houseId: string, h: NewHouse): Promise<House> {
+  const { data, error } = await supabase
+    .from("houses")
+    .update(h)
+    .eq("id", houseId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data as House;
+}
+
+export async function deleteHouse(houseId: string): Promise<void> {
+  const { error } = await supabase.from("houses").delete().eq("id", houseId);
+  if (error) throw error;
+}
+
 export async function getActiveFlock(houseId: string): Promise<Flock | null> {
   const { data, error } = await supabase
     .from("flocks")
@@ -88,6 +104,49 @@ export async function createFlock(houseId: string, f: NewFlock): Promise<Flock> 
     .single();
   if (error) throw error;
   return data as Flock;
+}
+
+export async function updateFlock(
+  flockId: string,
+  fields: { placement_date?: string; bird_count?: number }
+): Promise<Flock> {
+  const { data, error } = await supabase
+    .from("flocks")
+    .update(fields)
+    .eq("id", flockId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data as Flock;
+}
+
+/** Retire the current flock (mark inactive) so a new one can be placed. */
+export async function endFlock(flockId: string): Promise<void> {
+  const { error } = await supabase.from("flocks").update({ active: false }).eq("id", flockId);
+  if (error) throw error;
+}
+
+export type MortalitySummary = { cumulative_dead: number; today_dead: number };
+
+export async function getMortalitySummary(flockId: string): Promise<MortalitySummary> {
+  const { data, error } = await supabase
+    .from("mortality")
+    .select("recorded_on, dead")
+    .eq("flock_id", flockId);
+  if (error) throw error;
+  const today = new Date().toISOString().slice(0, 10);
+  let cumulative_dead = 0;
+  let today_dead = 0;
+  for (const r of (data ?? []) as { recorded_on: string; dead: number }[]) {
+    cumulative_dead += r.dead;
+    if (r.recorded_on === today) today_dead += r.dead;
+  }
+  return { cumulative_dead, today_dead };
+}
+
+export async function logMortality(flockId: string, dead: number): Promise<void> {
+  const { error } = await supabase.from("mortality").insert({ flock_id: flockId, dead });
+  if (error) throw error;
 }
 
 /** Bird age in days from the placement date, clamped to the engine's

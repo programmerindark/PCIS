@@ -5,14 +5,14 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 import {
-  getMyFarm, getHouses, getActiveFlock, createFlock, birdAgeDays,
-  updateFarmLocation, saveRecommendation,
+  getMyFarm, getHouses, getActiveFlock, createFlock, updateFlock, endFlock, birdAgeDays,
+  updateFarmLocation, saveRecommendation, getMortalitySummary, logMortality, type MortalitySummary,
 } from "@/lib/db";
-import { recommend, schedule } from "@/lib/api";
+import { recommend, schedule, advise, mortality } from "@/lib/api";
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
 import Nav from "@/components/Nav";
 import type {
-  Farm, House, Flock, RecommendResponse, ScheduleResponse, Alert,
+  Farm, House, Flock, RecommendResponse, ScheduleResponse, Alert, AdviseResponse, MortalityResponse,
 } from "@/lib/types";
 
 const RISK_COLOR: Record<string, string> = { Low: "var(--ok)", Moderate: "var(--warn)", High: "var(--danger)" };
@@ -54,11 +54,20 @@ export default function DashboardPage() {
 
   const [result, setResult] = useState<RecommendResponse | null>(null);
   const [sched, setSched] = useState<ScheduleResponse | null>(null);
+  const [advice, setAdvice] = useState<AdviseResponse | null>(null);
+  const [adviceAck, setAdviceAck] = useState(false);
   const [computing, setComputing] = useState(false);
   const [error, setError] = useState("");
 
   const [flockCount, setFlockCount] = useState(20000);
   const [flockDate, setFlockDate] = useState(daysAgoISO(28));
+  const [editingFlock, setEditingFlock] = useState(false);
+
+  const [mort, setMort] = useState<MortalitySummary>({ cumulative_dead: 0, today_dead: 0 });
+  const [mortAssess, setMortAssess] = useState<MortalityResponse | null>(null);
+  const [deaths, setDeaths] = useState<number>(0);
+
+  const liveCount = flock ? Math.max(0, flock.bird_count - mort.cumulative_dead) : 0;
 
   const [locBusy, setLocBusy] = useState(false);
   const [lat, setLat] = useState("");
@@ -102,18 +111,26 @@ export default function DashboardPage() {
     if (!house || !flock) return;
     setComputing(true);
     setError("");
+    const age = birdAgeDays(flock.placement_date);
+    const live = Math.max(0, flock.bird_count - mort.cumulative_dead);
     const base = {
       length_m: house.length_m, width_m: house.width_m, height_m: house.height_m,
       insulation: house.insulation, fan_index: house.fan_index,
       installed_fans: house.installed_fans, static_pressure_pa: house.static_pressure_pa,
       cooling_pads: house.has_cooling_pads, heater_kw: house.heater_kw,
-      bird_age_days: birdAgeDays(flock.placement_date), bird_count: flock.bird_count,
+      bird_age_days: age, bird_count: Math.max(1, live),
       indoor_rh_pct: inRh, outdoor_t_c: outT, outdoor_rh_pct: outRh,
     };
     try {
       const res = (await recommend(base)) as RecommendResponse;
       setResult(res);
       saveRecommendation(house.id, flock.id, res);
+      setAdviceAck(false);
+      advise(base).then((a) => setAdvice(a as AdviseResponse)).catch(() => setAdvice(null));
+      mortality({
+        placed: flock.bird_count, cumulative_dead: mort.cumulative_dead,
+        age_days: age, dead_today: mort.today_dead,
+      }).then((mm) => setMortAssess(mm as MortalityResponse)).catch(() => setMortAssess(null));
       if (profile && profile.length > 0) {
         const s = (await schedule({ ...base, profile, step_hours: 3 })) as ScheduleResponse;
         setSched(s);
@@ -123,12 +140,17 @@ export default function DashboardPage() {
     } finally {
       setComputing(false);
     }
-  }, [house, flock, inRh, outT, outRh, profile]);
+  }, [house, flock, inRh, outT, outRh, profile, mort]);
+
+  useEffect(() => {
+    if (flock) getMortalitySummary(flock.id).then(setMort).catch(() => setMort({ cumulative_dead: 0, today_dead: 0 }));
+    else setMort({ cumulative_dead: 0, today_dead: 0 });
+  }, [flock]);
 
   useEffect(() => {
     if (house && flock) compute();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [house, flock, profile]);
+  }, [house, flock, profile, mort]);
 
   async function addFlock(e: React.FormEvent) {
     e.preventDefault();
@@ -136,6 +158,39 @@ export default function DashboardPage() {
     const f = await createFlock(house.id, { name: "Flock", placement_date: flockDate, bird_count: flockCount })
       .catch((err) => { setError(err?.message ?? "Could not create flock."); return null; });
     if (f) setFlock(f);
+  }
+
+  function startEditFlock() {
+    if (!flock) return;
+    setFlockDate(flock.placement_date);
+    setFlockCount(flock.bird_count);
+    setEditingFlock(true);
+  }
+
+  async function saveFlockEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!flock) return;
+    const f = await updateFlock(flock.id, { placement_date: flockDate, bird_count: flockCount })
+      .catch((err) => { setError(err?.message ?? "Could not update flock."); return null; });
+    if (f) { setFlock(f); setEditingFlock(false); }
+  }
+
+  async function startNewFlock() {
+    if (!flock) return;
+    if (!window.confirm("End the current flock and place a new one? The old flock's history is kept.")) return;
+    await endFlock(flock.id).catch(() => {});
+    setFlock(null); setResult(null); setSched(null); setAdvice(null);
+    setMort({ cumulative_dead: 0, today_dead: 0 }); setMortAssess(null);
+    setFlockDate(daysAgoISO(0)); setFlockCount(20000);
+  }
+
+  async function submitDeaths(e: React.FormEvent) {
+    e.preventDefault();
+    if (!flock || deaths <= 0) return;
+    await logMortality(flock.id, Math.round(deaths)).catch((err) => setError(err?.message ?? "Could not log mortality."));
+    setDeaths(0);
+    const s = await getMortalitySummary(flock.id).catch(() => null);
+    if (s) setMort(s); // triggers recompute with the new live count
   }
 
   async function useMyLocation() {
@@ -173,6 +228,10 @@ export default function DashboardPage() {
 
   const bs = result?.bird_status;
   const alerts = result && house ? deriveAlerts(result, house, sched) : [];
+  if (mortAssess && !mortAssess.within_target)
+    alerts.push({ severity: "critical", title: "Mortality above acceptable limit", message: mortAssess.note });
+  else if (mortAssess && mortAssess.elevated_today)
+    alerts.push({ severity: "warning", title: "Elevated mortality today", message: mortAssess.note });
 
   return (
     <>
@@ -185,6 +244,12 @@ export default function DashboardPage() {
               {farm?.name}
               {flock ? ` · ${flock.bird_count.toLocaleString()} birds · day ${birdAgeDays(flock.placement_date)}` : ""}
             </p>
+            {flock && (
+              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                <button className="ghost-btn" style={{ padding: "5px 10px", fontSize: 13 }} onClick={startEditFlock}>Edit flock</button>
+                <button className="ghost-btn" style={{ padding: "5px 10px", fontSize: 13 }} onClick={startNewFlock}>New flock</button>
+              </div>
+            )}
           </div>
           {houses.length > 1 && (
             <select value={house?.id} onChange={async (e) => {
@@ -200,6 +265,26 @@ export default function DashboardPage() {
         {houses.length === 0 && (
           <div className="placeholder" style={{ marginTop: 16 }}>
             No houses yet. <Link href="/houses">Add your first house</Link> to begin.
+          </div>
+        )}
+
+        {/* Edit flock */}
+        {flock && editingFlock && (
+          <div className="tile" style={{ maxWidth: 480, marginTop: 16 }}>
+            <h3 style={{ marginTop: 0 }}>Edit flock</h3>
+            <form onSubmit={saveFlockEdit}>
+              <label>Placement date</label>
+              <input type="date" value={flockDate} onChange={(e) => setFlockDate(e.target.value)} style={{ padding: "10px 12px", borderRadius: 9, background: "var(--surface-2)", border: "1px solid var(--line)", color: "var(--ink)", fontSize: 15, width: "100%" }} />
+              <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+                Age today would be day {birdAgeDays(flockDate)}.
+              </p>
+              <label>Bird count</label>
+              <input type="number" value={flockCount} onChange={(e) => setFlockCount(+e.target.value)} />
+              <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+                <button className="primary" type="submit" style={{ maxWidth: 160, margin: 0 }}>Save</button>
+                <button type="button" className="ghost-btn" onClick={() => setEditingFlock(false)}>Cancel</button>
+              </div>
+            </form>
           </div>
         )}
 
@@ -257,6 +342,43 @@ export default function DashboardPage() {
 
             {error && <div className="msg error" style={{ marginTop: 12 }}>{error}</div>}
 
+            {/* AI Advisor */}
+            {advice && (
+              <div className="tile" style={{ marginTop: 16, borderColor: "var(--accent)", background: "var(--surface)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                  <div className="cap" style={{ color: "var(--accent-text, var(--accent))" }}>✦ AI Advisor · action recommended</div>
+                  <div className="cap">Confidence {advice.confidence}/100</div>
+                </div>
+                <div style={{ fontSize: 22, fontWeight: 800, marginTop: 8 }}>{advice.headline}</div>
+                <p className="muted" style={{ marginTop: 4 }}>{advice.detail}</p>
+
+                <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 12 }}>
+                  {advice.feel_before_c != null && advice.feel_after_c != null && (
+                    <Expected label="Feel temperature"
+                      text={`${advice.feel_before_c}°C → ${advice.feel_after_c}°C`}
+                      good={advice.feel_after_c < advice.feel_before_c} />
+                  )}
+                  <Expected label="Panting (est.)"
+                    text={`${advice.panting_before} → ${advice.panting_after}`}
+                    good={advice.panting_after !== advice.panting_before} />
+                  <Expected label="Heat-stress" text={advice.heat_stress_risk}
+                    good={advice.heat_stress_risk === "Low"} />
+                </div>
+
+                <p className="muted" style={{ marginTop: 12, fontSize: 13 }}>{advice.why}</p>
+
+                <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
+                  <button className="primary" style={{ maxWidth: 220, margin: 0 }}
+                    onClick={() => setAdviceAck(true)} disabled={adviceAck}>
+                    {adviceAck ? "Noted ✓" : "Apply recommendation"}
+                  </button>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    Advice only — v1 doesn’t control your equipment; apply it on your controller.
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* Alerts */}
             {alerts.length > 0 && (
               <div className="tile" style={{ marginTop: 16 }}>
@@ -284,6 +406,30 @@ export default function DashboardPage() {
               <Tile cap="Heat-stress risk" val={bs?.heat_stress_risk ?? "—"} color={bs ? RISK_COLOR[bs.heat_stress_risk] : undefined} />
               <Tile cap="Fans running" val={result ? `${result.fans_on} / ${house.installed_fans}` : "—"}
                 color={result && result.fans_on > house.installed_fans ? "var(--danger)" : undefined} />
+            </div>
+
+            {/* Flock health / mortality */}
+            <div className="tile" style={{ marginTop: 16 }}>
+              <div className="cap">Flock health · live birds & mortality</div>
+              <div className="grid" style={{ marginTop: 10 }}>
+                <KV k="Live birds" v={`${liveCount.toLocaleString()} / ${flock.bird_count.toLocaleString()}`} />
+                <KV k="Cumulative loss" v={mortAssess ? `${mort.cumulative_dead.toLocaleString()} (${mortAssess.cumulative_pct}%)` : `${mort.cumulative_dead.toLocaleString()}`} />
+                <KV k="Acceptable ≤" v={mortAssess ? `${mortAssess.acceptable_pct}%` : "—"} />
+                <KV k="Today" v={`${mort.today_dead.toLocaleString()}`} />
+              </div>
+              {mortAssess && (
+                <div className="msg" style={{ marginTop: 10, color: mortAssess.within_target ? "var(--ok)" : "var(--danger)" }}>
+                  {mortAssess.within_target ? "✓ " : "⚠ "}{mortAssess.note}
+                </div>
+              )}
+              <form onSubmit={submitDeaths} style={{ display: "flex", gap: 10, alignItems: "end", marginTop: 12 }}>
+                <div>
+                  <label style={{ marginTop: 0 }}>Log deaths today</label>
+                  <input type="number" min={0} value={deaths} onChange={(e) => setDeaths(+e.target.value)} style={{ width: 140 }} />
+                </div>
+                <button className="primary" type="submit" style={{ maxWidth: 120, margin: 0 }} disabled={deaths <= 0}>Add</button>
+                <span className="muted" style={{ fontSize: 12 }}>Live count feeds the engine — fewer birds, less ventilation needed.</span>
+              </form>
             </div>
 
             {/* Day plan */}
@@ -336,6 +482,14 @@ function Field({ label, value, onChange }: { label: string; value: number; onCha
     <div>
       <label style={{ marginTop: 0 }}>{label}</label>
       <input type="number" value={value} onChange={(e) => onChange(+e.target.value)} style={{ width: 130 }} />
+    </div>
+  );
+}
+function Expected({ label, text, good }: { label: string; text: string; good: boolean }) {
+  return (
+    <div>
+      <div className="cap">{label}</div>
+      <div style={{ fontWeight: 700, fontSize: 16, marginTop: 4, color: good ? "var(--ok)" : "var(--ink)" }}>{text}</div>
     </div>
   );
 }

@@ -30,3 +30,11 @@ export function recommend(input: Record<string, unknown>) {
 export function schedule(input: Record<string, unknown>) {
   return post<Record<string, any>>("/schedule", input);
 }
+
+export function advise(input: Record<string, unknown>) {
+  return post<Record<string, any>>("/advise", input);
+}
+
+export function mortality(input: Record<string, unknown>) {
+  return post<Record<string, any>>("/mortality", input);
+}
