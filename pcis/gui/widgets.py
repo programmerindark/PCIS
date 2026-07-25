@@ -185,6 +185,11 @@ def _scrollable(inner: QWidget) -> QScrollArea:
     area.setWidget(inner)
     area.setWidgetResizable(True)
     area.setFrameShape(QFrame.NoFrame)
+    # Never scroll sideways: the content must reflow/wrap to the viewport
+    # width instead. Without this, any widget with a large minimum width
+    # (e.g. the metrics row) forces a horizontal scrollbar and the tab
+    # looks "zoomed in" and won't fit the window.
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     return area
 
 

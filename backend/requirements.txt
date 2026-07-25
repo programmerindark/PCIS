@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+# The engine (pcis.core / pcis.equipment) is pure standard-library Python,
+# imported from the repo root — no extra runtime deps needed for it.

@@ -27,7 +27,7 @@ import datetime as dt
 import logging
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -147,6 +147,19 @@ class MetricsPanel(QWidget):
 
         self._columns = 0
         self._relayout(len(specs))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt override)
+        """Report a one-column minimum so the panel can be squeezed narrow.
+
+        Without this, the grid's minimum width reflects the CURRENT column
+        count (up to 8 * ~190px), which is wider than the window and forces
+        the whole tab to overflow sideways. Reporting one column wide lets
+        the scroll area shrink the panel to the viewport, which triggers
+        `resizeEvent` -> `apply_width` and reflows the metrics onto as many
+        rows as needed.
+        """
+        base = super().minimumSizeHint()
+        return QSize(self.MIN_COLUMN_PX, base.height())
 
     def _relayout(self, columns: int) -> None:
         if columns == self._columns:
@@ -1440,6 +1453,17 @@ def main() -> None:
 
     logging_setup.initialise()
     config.ensure_directories()
+
+    # High-DPI: use fractional (pass-through) scale-factor rounding so the
+    # app matches the OS scale exactly on 125%/150% Windows displays. The
+    # default rounding can bump 150% up and make everything look "zoomed
+    # in". Must be set before the QApplication is created.
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:  # pragma: no cover - older/newer Qt variations
+        pass
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("PCIS")

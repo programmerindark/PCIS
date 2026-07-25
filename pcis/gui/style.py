@@ -468,8 +468,8 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 
 QToolTip {{
     background: {p['INK']};
-    color: white;
-    border: none;
+    color: {p['SURFACE']};
+    border: 1px solid {p['LINE']};
     border-radius: 4px;
     padding: 6px 9px;
 }}
