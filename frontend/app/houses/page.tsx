@@ -7,7 +7,7 @@ import {
   getMyFarm, getHouses, createHouse, updateHouse, deleteHouse, type NewHouse,
 } from "@/lib/db";
 import { getCatalog } from "@/lib/api";
-import Nav from "@/components/Nav";
+import AppShell from "@/components/AppShell";
 import type { Farm, House, Catalog } from "@/lib/types";
 
 const BLANK: NewHouse = {
@@ -100,11 +100,9 @@ export default function HousesPage() {
   if (loading) return <div className="auth-wrap"><div className="muted">Loading…</div></div>;
 
   return (
-    <>
-      <Nav email={email} />
-      <div className="page">
-        <h2>{farm?.name} — Houses</h2>
-        <p className="muted">Add or edit each broiler house; the dashboard reads them to advise you.</p>
+    <AppShell email={email} title="Houses">
+      <div className="page-inner">
+        <p className="muted" style={{ marginTop: 0 }}>Add or edit each broiler house; the dashboard reads them to advise you.</p>
 
         {/* Form (create or edit) */}
         {showForm && (
@@ -186,7 +184,7 @@ export default function HousesPage() {
           </div>
         )}
       </div>
-    </>
+    </AppShell>
   );
 }
 

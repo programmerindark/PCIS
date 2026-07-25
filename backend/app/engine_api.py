@@ -44,6 +44,14 @@ def list_pads() -> list[dict]:
     ]
 
 
+def growth_curve() -> list[dict]:
+    """Aviagen Ross 308 as-hatched body weight (kg) for days 0-56 [cited]."""
+    return [
+        {"day": d, "weight_kg": round(gc.ross_308_body_weight_kg(float(d)), 3)}
+        for d in range(int(gc.ROSS_308_MIN_AGE_DAYS), int(gc.ROSS_308_MAX_AGE_DAYS) + 1)
+    ]
+
+
 def insulation_levels() -> list[dict]:
     """The insulation choices, with the cited U-values they resolve to."""
     out = []

@@ -63,6 +63,12 @@ def catalog() -> dict:
     }
 
 
+@app.get("/growth-curve")
+def growth_curve() -> dict:
+    """The cited Aviagen Ross 308 body-weight curve, days 0-56."""
+    return {"points": engine_api.growth_curve()}
+
+
 @app.post("/recommend")
 def recommend(req: RecommendRequest) -> dict:
     """Single-moment recommendation for the current conditions."""

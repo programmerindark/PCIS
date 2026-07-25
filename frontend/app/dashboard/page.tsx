@@ -8,9 +8,17 @@ import {
   getMyFarm, getHouses, getActiveFlock, createFlock, updateFlock, endFlock, birdAgeDays,
   updateFarmLocation, saveRecommendation, getMortalitySummary, logMortality, type MortalitySummary,
 } from "@/lib/db";
-import { recommend, schedule, advise, mortality } from "@/lib/api";
+import { recommend, schedule, advise, mortality, getGrowthCurve } from "@/lib/api";
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
-import Nav from "@/components/Nav";
+import AppShell from "@/components/AppShell";
+import { ClimateTrend, GrowthCurve } from "@/components/Charts";
+import dynamic from "next/dynamic";
+
+// 3D house is client-only (WebGL) — never render it on the server.
+const House3D = dynamic(() => import("@/components/House3D"), {
+  ssr: false,
+  loading: () => <div style={{ height: 320, display: "grid", placeItems: "center", color: "var(--ink-muted)" }}>Loading house view…</div>,
+});
 import type {
   Farm, House, Flock, RecommendResponse, ScheduleResponse, Alert, AdviseResponse, MortalityResponse,
 } from "@/lib/types";
@@ -66,6 +74,7 @@ export default function DashboardPage() {
   const [mort, setMort] = useState<MortalitySummary>({ cumulative_dead: 0, today_dead: 0 });
   const [mortAssess, setMortAssess] = useState<MortalityResponse | null>(null);
   const [deaths, setDeaths] = useState<number>(0);
+  const [growth, setGrowth] = useState<{ day: number; weight_kg: number }[]>([]);
 
   const liveCount = flock ? Math.max(0, flock.bird_count - mort.cumulative_dead) : 0;
 
@@ -146,6 +155,10 @@ export default function DashboardPage() {
     if (flock) getMortalitySummary(flock.id).then(setMort).catch(() => setMort({ cumulative_dead: 0, today_dead: 0 }));
     else setMort({ cumulative_dead: 0, today_dead: 0 });
   }, [flock]);
+
+  useEffect(() => {
+    getGrowthCurve().then((r) => setGrowth(r.points)).catch(() => setGrowth([]));
+  }, []);
 
   useEffect(() => {
     if (house && flock) compute();
@@ -234,9 +247,16 @@ export default function DashboardPage() {
     alerts.push({ severity: "warning", title: "Elevated mortality today", message: mortAssess.note });
 
   return (
-    <>
-      <Nav email={email} />
-      <div className="page">
+    <AppShell
+      email={email}
+      title={farm?.name ?? "Dashboard"}
+      right={
+        farm?.latitude != null && wxSource === "weather" ? (
+          <span className="pill">☁ {outT}°C · {outRh}% RH</span>
+        ) : null
+      }
+    >
+      <div className="page-inner">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
           <div>
             <h2 style={{ marginBottom: 2 }}>{house ? house.name : "Dashboard"}</h2>
@@ -379,6 +399,28 @@ export default function DashboardPage() {
               </div>
             )}
 
+            {/* Live 3D house view */}
+            <div className="tile" style={{ marginTop: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                <div className="cap">Live house view</div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Tunnel fans {result?.fans_on ?? 0}/{house.installed_fans} · pads {result?.pads_on ? "ON" : "off"}
+                  {result?.air_speed_mps != null ? ` · ${result.air_speed_mps} m/s` : ""}
+                </div>
+              </div>
+              <div style={{ marginTop: 8, borderRadius: 12, overflow: "hidden", background: "#0b1220" }}>
+                <House3D
+                  fansOn={result?.fans_on ?? 0}
+                  installedFans={house.installed_fans}
+                  padsOn={!!result?.pads_on}
+                  airSpeed={result?.air_speed_mps ?? null}
+                  risk={bs?.heat_stress_risk ?? "Low"}
+                  feelTempC={result?.effective_temp_c ?? null}
+                  targetTempC={result?.comfort.target_temp_c ?? null}
+                />
+              </div>
+            </div>
+
             {/* Alerts */}
             {alerts.length > 0 && (
               <div className="tile" style={{ marginTop: 16 }}>
@@ -452,6 +494,22 @@ export default function DashboardPage() {
               </div>
             )}
 
+            {/* Charts */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, marginTop: 16 }}>
+              {profile && profile.length > 0 && (
+                <div className="tile">
+                  <div className="cap">Climate trend · today</div>
+                  <div style={{ marginTop: 8 }}><ClimateTrend points={profile} /></div>
+                </div>
+              )}
+              {growth.length > 0 && (
+                <div className="tile">
+                  <div className="cap">Bird weight vs Aviagen Ross-308 target</div>
+                  <div style={{ marginTop: 8 }}><GrowthCurve points={growth} currentDay={birdAgeDays(flock.placement_date)} /></div>
+                </div>
+              )}
+            </div>
+
             {/* Recommendation detail */}
             {result && (
               <div className="tile" style={{ marginTop: 16 }}>
@@ -473,7 +531,7 @@ export default function DashboardPage() {
           </>
         )}
       </div>
-    </>
+    </AppShell>
   );
 }
 

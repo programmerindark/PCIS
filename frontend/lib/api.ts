@@ -23,6 +23,12 @@ export async function getCatalog() {
   return res.json();
 }
 
+export async function getGrowthCurve(): Promise<{ points: { day: number; weight_kg: number }[] }> {
+  const res = await fetch(`${BASE}/growth-curve`);
+  if (!res.ok) throw new Error("Failed to load growth curve");
+  return res.json();
+}
+
 export function recommend(input: Record<string, unknown>) {
   return post<Record<string, any>>("/recommend", input);
 }
