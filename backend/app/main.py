@@ -37,6 +37,17 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+def root() -> dict:
+    """Friendly landing payload so the bare URL isn't a 404."""
+    return {
+        "service": "pcis-api",
+        "version": app.version,
+        "try": "/docs",
+        "endpoints": ["/health", "/catalog", "/recommend", "/schedule"],
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "pcis-api", "version": app.version}
