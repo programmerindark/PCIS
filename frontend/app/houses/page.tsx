@@ -8,6 +8,7 @@ import {
 } from "@/lib/db";
 import { getCatalog } from "@/lib/api";
 import AppShell from "@/components/AppShell";
+import { useUnits, metresToDisplay, displayToMetres, lengthSuffix } from "@/lib/units";
 import type { Farm, House, Catalog } from "@/lib/types";
 
 const BLANK: NewHouse = {
@@ -43,6 +44,10 @@ export default function HousesPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [units] = useUnits();
+  const L = (m: number) => +metresToDisplay(m, units).toFixed(1);
+  const toM = (v: number) => displayToMetres(v, units);
+  const us = lengthSuffix(units);
 
   useEffect(() => {
     (async () => {
@@ -116,10 +121,15 @@ export default function HousesPage() {
               <input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="House 02 - Broiler Shed" required />
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-                <div><label>Length (m)</label><input type="number" step="0.5" value={form.length_m} onChange={(e) => set("length_m", +e.target.value)} /></div>
-                <div><label>Width (m)</label><input type="number" step="0.5" value={form.width_m} onChange={(e) => set("width_m", +e.target.value)} /></div>
-                <div><label>Height (m)</label><input type="number" step="0.5" value={form.height_m} onChange={(e) => set("height_m", +e.target.value)} /></div>
+                <div><label>Length ({us})</label><input type="number" step="0.5" value={L(form.length_m)} onChange={(e) => set("length_m", toM(+e.target.value))} /></div>
+                <div><label>Width ({us})</label><input type="number" step="0.5" value={L(form.width_m)} onChange={(e) => set("width_m", toM(+e.target.value))} /></div>
+                <div><label>Height ({us})</label><input type="number" step="0.5" value={L(form.height_m)} onChange={(e) => set("height_m", toM(+e.target.value))} /></div>
               </div>
+
+              <p className="muted" style={{ fontSize: 11.5 }}>
+                Tunnel cross-section {(form.width_m * form.height_m).toFixed(1)} m² (width × height) — this drives air speed.
+                Dimensions are stored in metres whatever units you display.
+              </p>
 
               <label>Insulation</label>
               <select value={form.insulation} onChange={(e) => set("insulation", e.target.value as NewHouse["insulation"])} style={selectStyle}>
@@ -166,7 +176,7 @@ export default function HousesPage() {
               <div className="cap">House</div>
               <div className="val" style={{ fontSize: 20 }}>{h.name}</div>
               <div className="muted" style={{ marginTop: 8 }}>
-                {h.length_m}×{h.width_m}×{h.height_m} m · {h.installed_fans} fans · {h.insulation.replace("_", " ")}
+                {L(h.length_m)}×{L(h.width_m)}×{L(h.height_m)} {us} · {h.installed_fans} fans · {h.insulation.replace("_", " ")}
                 {h.has_cooling_pads ? " · pads" : ""}{h.heater_kw > 0 ? ` · ${h.heater_kw} kW heat` : ""}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>

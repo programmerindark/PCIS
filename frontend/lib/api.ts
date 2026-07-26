@@ -44,3 +44,48 @@ export function advise(input: Record<string, unknown>) {
 export function mortality(input: Record<string, unknown>) {
   return post<Record<string, any>>("/mortality", input);
 }
+
+export type EcowittReading = {
+  ok: boolean;
+  error: string | null;
+  indoor_t_c: number | null;
+  indoor_rh_pct: number | null;
+  source_block: string | null;
+  available_blocks: string[];
+  blocks: Record<string, { temperature_c?: number; humidity_pct?: number }>;
+  // A two-module install measures ambient as well as house conditions, so
+  // the outdoor figures below come from hardware rather than a forecast.
+  outdoor_t_c: number | null;
+  outdoor_rh_pct: number | null;
+  outdoor_source_block: string | null;
+  outdoor_measured: boolean;
+  // Barometric pressure: PCIS psychrometrics assume sea level unless this
+  // is supplied, which understates humidity ratio and overstates how much
+  // heat each cubic metre of fan air can carry.
+  pressure_hpa: number | null;
+  // Ecowitt's own derived values, kept as independent cross-checks and
+  // never substituted for the engine's psychrometrics.
+  cross_checks: {
+    outdoor_dew_point_c?: number;
+    indoor_dew_point_c?: number;
+    wind_speed_mps?: number;
+    measured_air_speed_mps?: number;
+  } | null;
+};
+
+export function readEcowittCloud(input: {
+  application_key: string; api_key: string; mac: string;
+  indoor_block?: string; outdoor_block?: string | null;
+}) {
+  return post<EcowittReading>("/sensor/ecowitt/cloud", input);
+}
+
+export function readEcowittLocal(input: { gateway_ip: string; indoor_block?: string }) {
+  return post<EcowittReading>("/sensor/ecowitt/local", input);
+}
+
+export type EcowittDevice = { name: string; mac: string; type?: string; last_update?: string };
+
+export function listEcowittDevices(input: { application_key: string; api_key: string }) {
+  return post<{ devices: EcowittDevice[]; message: string }>("/sensor/ecowitt/devices", input);
+}

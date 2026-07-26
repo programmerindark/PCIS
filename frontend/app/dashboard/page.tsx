@@ -7,13 +7,15 @@ import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabaseClient";
 import {
   getMyFarm, getHouses, getActiveFlock, createFlock, updateFlock, endFlock, birdAgeDays,
-  updateFarmLocation, saveRecommendation, getMortalitySummary, logMortality, type MortalitySummary,
+  updateFarmLocation, updateFarmSensor, saveRecommendation, getMortalitySummary, logMortality, setLiveCount, type MortalitySummary,
 } from "@/lib/db";
-import { recommend, schedule, advise, mortality, getGrowthCurve } from "@/lib/api";
+import { recommend, schedule, advise, mortality, getGrowthCurve, readEcowittCloud, listEcowittDevices, type EcowittReading, type EcowittDevice } from "@/lib/api";
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
 import AppShell from "@/components/AppShell";
 import Modal from "@/components/Modal";
 import { ClimateTrend, GrowthCurve, Sparkline } from "@/components/Charts";
+import LocationPicker from "@/components/LocationPicker";
+import { useUnits, cToDisplay, displayToC, tempSuffix, speedToDisplay, speedSuffix } from "@/lib/units";
 import type {
   Farm, House, Flock, RecommendResponse, ScheduleResponse, Alert, AdviseResponse, MortalityResponse,
 } from "@/lib/types";
@@ -61,6 +63,25 @@ function Ring({ pct, label }: { pct: number; label: string }) {
   );
 }
 
+
+/** A failed sensor read, shaped like a real one.
+ *
+ * Kept as a helper rather than an inline literal in three places: the
+ * reading type grows every time the gateway turns out to expose something
+ * useful (pressure, measured outdoor, air speed), and duplicated literals
+ * meant each addition broke the build in several spots at once.
+ */
+function sensorError(error: string): EcowittReading {
+  return {
+    ok: false, error,
+    indoor_t_c: null, indoor_rh_pct: null,
+    source_block: null, available_blocks: [], blocks: {},
+    outdoor_t_c: null, outdoor_rh_pct: null,
+    outdoor_source_block: null, outdoor_measured: false,
+    pressure_hpa: null, cross_checks: null,
+  };
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [email, setEmail] = useState<string | null>(null);
@@ -94,9 +115,16 @@ export default function DashboardPage() {
   const [showConditions, setShowConditions] = useState(false);
   const [modal, setModal] = useState<null | "climate" | "growth" | "plan">(null);
 
-  const [locBusy, setLocBusy] = useState(false);
-  const [lat, setLat] = useState("");
-  const [lon, setLon] = useState("");
+  const [showLocation, setShowLocation] = useState(false);
+  const [showSensor, setShowSensor] = useState(false);
+  const [sensor, setSensor] = useState<EcowittReading | null>(null);
+  const [sensorBusy, setSensorBusy] = useState(false);
+  const [devices, setDevices] = useState<EcowittDevice[] | null>(null);
+  const [ecoKeys, setEcoKeys] = useState({ application_key: "", api_key: "", mac: "", indoor_block: "outdoor" });
+  const [liveInput, setLiveInput] = useState<number | null>(null);
+  const [units] = useUnits();
+  const T = (c: number) => +cToDisplay(c, units).toFixed(1);
+  const ts = tempSuffix(units);
 
   const liveCount = flock ? Math.max(0, flock.bird_count - mort.cumulative_dead) : 0;
   const age = flock ? birdAgeDays(flock.placement_date) : 0;
@@ -127,6 +155,26 @@ export default function DashboardPage() {
         setHouse(chosen);
         setFlock(await getActiveFlock(chosen.id).catch(() => null));
       }
+      if (f.ecowitt_application_key && f.ecowitt_api_key && f.ecowitt_mac) {
+        const k = {
+          application_key: f.ecowitt_application_key,
+          api_key: f.ecowitt_api_key,
+          mac: f.ecowitt_mac,
+          indoor_block: f.ecowitt_indoor_block || "outdoor",
+        };
+        setEcoKeys(k);
+        readEcowittCloud(k).then((r) => {
+          setSensor(r);
+          if (r.ok && r.indoor_rh_pct != null) setInRh(r.indoor_rh_pct);
+          // A two-module install measures ambient too. Measured beats
+          // forecast for conditions right now, so it overrides the
+          // Open-Meteo values that refreshWeather() filled in.
+          if (r.ok && r.outdoor_measured) {
+            if (r.outdoor_t_c != null) setOutT(r.outdoor_t_c);
+            if (r.outdoor_rh_pct != null) setOutRh(r.outdoor_rh_pct);
+          }
+        }).catch(() => {});
+      }
       await refreshWeather(f);
       setLoading(false);
     })();
@@ -150,6 +198,13 @@ export default function DashboardPage() {
       cooling_pads: house.has_cooling_pads, heater_kw: house.heater_kw,
       bird_age_days: birdAgeDays(flock.placement_date), bird_count: live,
       indoor_rh_pct: inRh, outdoor_t_c: outT, outdoor_rh_pct: outRh,
+      // Measured extras. Both are optional: omitted, the engine falls back
+      // to sea-level pressure and skips the air-speed cross-check, which is
+      // exactly the pre-sensor behaviour.
+      pressure_hpa: sensor?.ok ? sensor.pressure_hpa ?? undefined : undefined,
+      measured_air_speed_mps: sensor?.ok
+        ? sensor.cross_checks?.measured_air_speed_mps ?? undefined
+        : undefined,
     };
     try {
       const res = (await recommend(base)) as RecommendResponse;
@@ -163,7 +218,7 @@ export default function DashboardPage() {
     } catch (err: any) {
       setError(err?.message ?? "Could not reach the engine API. Is it running?");
     } finally { setComputing(false); }
-  }, [house, flock, inRh, outT, outRh, profile, mort]);
+  }, [house, flock, inRh, outT, outRh, profile, mort, sensor]);
 
   useEffect(() => { if (house && flock) compute(); /* eslint-disable-next-line */ }, [house, flock, profile, mort]);
 
@@ -179,7 +234,15 @@ export default function DashboardPage() {
     e.preventDefault();
     if (!flock) return;
     const f = await updateFlock(flock.id, { placement_date: flockDate, bird_count: flockCount }).catch(() => null);
-    if (f) { setFlock(f); setEditingFlock(false); }
+    if (f) {
+      if (liveInput != null && liveInput !== flock.bird_count - mort.cumulative_dead) {
+        await setLiveCount(f.id, flockCount, liveInput).catch(() => {});
+        const s2 = await getMortalitySummary(f.id).catch(() => null);
+        if (s2) setMort(s2);
+      }
+      setFlock(f);
+      setEditingFlock(false);
+    }
   }
   async function startNewFlock() {
     if (!flock || !window.confirm("End the current flock and place a new one?")) return;
@@ -196,22 +259,56 @@ export default function DashboardPage() {
     const s = await getMortalitySummary(flock.id).catch(() => null);
     if (s) setMort(s);
   }
-  async function useMyLocation() {
-    if (!farm || !navigator.geolocation) return;
-    setLocBusy(true);
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-      const la = +pos.coords.latitude.toFixed(4), lo = +pos.coords.longitude.toFixed(4);
-      try { await updateFarmLocation(farm.id, la, lo); const nf = { ...farm, latitude: la, longitude: lo }; setFarm(nf); await refreshWeather(nf); }
-      finally { setLocBusy(false); }
-    }, () => { setLocBusy(false); setError("Location denied — enter manually."); });
+  async function findDevices() {
+    setSensorBusy(true);
+    try {
+      const r = await listEcowittDevices({
+        application_key: ecoKeys.application_key, api_key: ecoKeys.api_key,
+      });
+      setDevices(r.devices);
+      if (r.devices.length === 1) setEcoKeys((k) => ({ ...k, mac: r.devices[0].mac }));
+      if (r.devices.length === 0)
+        setSensor(sensorError(r.message || "No devices on this account."));
+    } catch (e: any) {
+      setSensor(sensorError(e?.message ?? "Device lookup failed"));
+    } finally { setSensorBusy(false); }
   }
-  async function saveManualLocation() {
+
+  async function readSensor(save: boolean) {
+    setSensorBusy(true);
+    try {
+      const r = await readEcowittCloud(ecoKeys);
+      setSensor(r);
+      if (r.ok && r.indoor_rh_pct != null) setInRh(r.indoor_rh_pct);
+      if (save && farm && r.ok) {
+        await updateFarmSensor(farm.id, {
+          ecowitt_application_key: ecoKeys.application_key,
+          ecowitt_api_key: ecoKeys.api_key,
+          ecowitt_mac: ecoKeys.mac,
+          ecowitt_indoor_block: ecoKeys.indoor_block,
+        });
+        setFarm({ ...farm, ...{
+          ecowitt_application_key: ecoKeys.application_key,
+          ecowitt_api_key: ecoKeys.api_key,
+          ecowitt_mac: ecoKeys.mac,
+          ecowitt_indoor_block: ecoKeys.indoor_block,
+        } });
+        setShowSensor(false);
+      }
+    } catch (e: any) {
+      setSensor(sensorError(e?.message ?? "Sensor read failed"));
+    } finally { setSensorBusy(false); }
+  }
+
+  /** Set the FARM's location (search / device / coordinates). Weather is
+   *  always fetched for the farm, so it stays right when you're away. */
+  async function pickLocation(la: number, lo: number) {
     if (!farm) return;
-    const la = parseFloat(lat), lo = parseFloat(lon);
-    if (Number.isNaN(la) || Number.isNaN(lo)) { setError("Enter valid coordinates."); return; }
-    setLocBusy(true);
-    try { await updateFarmLocation(farm.id, la, lo); const nf = { ...farm, latitude: la, longitude: lo }; setFarm(nf); await refreshWeather(nf); }
-    finally { setLocBusy(false); }
+    await updateFarmLocation(farm.id, la, lo);
+    const nf = { ...farm, latitude: la, longitude: lo };
+    setFarm(nf);
+    setShowLocation(false);
+    await refreshWeather(nf);
   }
 
   if (loading) return <div className="auth-wrap"><div className="muted">Loading…</div></div>;
@@ -263,18 +360,124 @@ export default function DashboardPage() {
         <div className="placeholder">No houses yet. <Link href="/houses" style={{ color: "var(--accent)" }}>Add your first house</Link>.</div>
       )}
 
-      {house && farm && farm.latitude == null && (
-        <div className="tile" style={{ marginBottom: 16 }}>
-          <div className="cap">Set farm location — enables automatic weather</div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end", marginTop: 10 }}>
-            <button className="primary" style={{ maxWidth: 210, margin: 0 }} onClick={useMyLocation} disabled={locBusy}>
-              {locBusy ? "…" : "Use my current location"}
-            </button>
-            <span className="muted">or</span>
-            <div><label style={{ marginTop: 0 }}>Latitude</label><input value={lat} onChange={(e) => setLat(e.target.value)} style={{ width: 120 }} placeholder="17.38" /></div>
-            <div><label style={{ marginTop: 0 }}>Longitude</label><input value={lon} onChange={(e) => setLon(e.target.value)} style={{ width: 120 }} placeholder="78.48" /></div>
-            <button className="ghost-btn" onClick={saveManualLocation} disabled={locBusy}>Save</button>
+      {house && farm && (farm.latitude == null || showLocation) && (
+        <div className="tile" style={{ marginBottom: 16, maxWidth: 620 }}>
+          <div className="tile-head">
+            <span className="tile-title">
+              {farm.latitude == null ? "Set farm location" : "Change farm location"}
+            </span>
+            {farm.latitude != null && (
+              <span className="muted" style={{ fontSize: 11.5 }}>
+                now {farm.latitude.toFixed(2)}, {farm.longitude?.toFixed(2)}
+              </span>
+            )}
           </div>
+          <LocationPicker
+            currentLat={farm.latitude}
+            currentLon={farm.longitude}
+            onPick={pickLocation}
+            onClose={farm.latitude != null ? () => setShowLocation(false) : undefined}
+          />
+        </div>
+      )}
+
+      {house && showSensor && (
+        <div className="tile" style={{ marginBottom: 16, maxWidth: 620 }}>
+          <div className="tile-head">
+            <span className="tile-title">Ecowitt sensor</span>
+            <button className="ghost-btn" onClick={() => setShowSensor(false)}>Close</button>
+          </div>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 0, lineHeight: 1.5 }}>
+            Reads MEASURED house conditions from your gateway. Get the Application Key,
+            API Key and device MAC from your ecowitt.net account (profile → API).
+            A WittBoy array reports under the <b>outdoor</b> block even when mounted inside,
+            so leave that selected unless your readings look wrong.
+          </p>
+          <label>Application key</label>
+          <input value={ecoKeys.application_key} onChange={(e) => setEcoKeys({ ...ecoKeys, application_key: e.target.value })} />
+          <label>API key</label>
+          <input value={ecoKeys.api_key} onChange={(e) => setEcoKeys({ ...ecoKeys, api_key: e.target.value })} />
+          <label>Device MAC</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={ecoKeys.mac} onChange={(e) => setEcoKeys({ ...ecoKeys, mac: e.target.value })} placeholder="XX:XX:XX:XX:XX:XX" />
+            <button className="ghost-btn" onClick={findDevices}
+              disabled={sensorBusy || ecoKeys.application_key.length < 8 || ecoKeys.api_key.length < 8}>
+              Find my devices
+            </button>
+          </div>
+          {devices && devices.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+              {devices.map((d) => (
+                <button key={d.mac} className="ghost-btn" style={{ textAlign: "left" }}
+                  onClick={() => setEcoKeys({ ...ecoKeys, mac: d.mac })}>
+                  <b>{d.name}</b> <span className="muted">{d.type ? `· ${d.type}` : ""}</span>
+                  <span className="muted" style={{ float: "right", fontSize: 11 }}>{d.mac}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <label>House reading comes from</label>
+          <select value={ecoKeys.indoor_block} onChange={(e) => setEcoKeys({ ...ecoKeys, indoor_block: e.target.value })}
+            style={{ padding: "11px 13px", borderRadius: 10, background: "rgba(118,118,128,0.24)", border: "1px solid transparent", color: "var(--ink)", width: "100%" }}>
+            <option value="outdoor">outdoor block (WittBoy / WS90 array)</option>
+            <option value="indoor">indoor block (gateway built-in probe)</option>
+            {(sensor?.available_blocks ?? []).filter((b) => b.startsWith("temp_and_humidity")).map((b) => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
+          <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+            <button className="primary" style={{ maxWidth: 150, margin: 0 }} onClick={() => readSensor(false)} disabled={sensorBusy}>
+              {sensorBusy ? "Reading…" : "Test read"}
+            </button>
+            <button className="ghost-btn" onClick={() => readSensor(true)} disabled={sensorBusy}>Save &amp; use</button>
+          </div>
+          {sensor && (
+            <div className="msg" style={{ color: sensor.ok ? "var(--green-bright)" : "var(--red)", fontSize: 13 }}>
+              {sensor.ok
+                ? `✓ ${sensor.indoor_t_c}°C · ${sensor.indoor_rh_pct}% RH from "${sensor.source_block}" (blocks seen: ${sensor.available_blocks.join(", ") || "none"})`
+                : `⚠ ${sensor.error ?? "No reading"}${sensor.available_blocks.length ? ` — blocks seen: ${sensor.available_blocks.join(", ")}` : ""}`}
+            </div>
+          )}
+
+          {/* Everything the gateway sends beyond temperature/RH. Shown so
+              the operator can see WHICH inputs are measured rather than
+              assumed — the difference matters when judging a
+              recommendation, and it was previously silently discarded. */}
+          {sensor?.ok && (
+            <div style={{ marginTop: 10, display: "grid", gap: 6, fontSize: 12.5, opacity: 0.85 }}>
+              {sensor.outdoor_measured && (
+                <div>
+                  <b>Outdoor measured</b> — {sensor.outdoor_t_c}°C · {sensor.outdoor_rh_pct}% RH
+                  {" "}from &quot;{sensor.outdoor_source_block}&quot;. Using this instead of the forecast.
+                </div>
+              )}
+              {sensor.pressure_hpa != null && (
+                <div>
+                  <b>Pressure</b> — {sensor.pressure_hpa} hPa
+                  {sensor.pressure_hpa < 1000
+                    ? " (above sea level; humidity and fan mass-flow corrected for it)"
+                    : ""}
+                </div>
+              )}
+              {sensor.cross_checks?.measured_air_speed_mps != null && (
+                <div>
+                  <b>In-house air speed</b> — {sensor.cross_checks.measured_air_speed_mps} m/s measured
+                  {result?.air_speed_mps != null && (
+                    <> vs {result.air_speed_mps} m/s computed
+                      {result.air_speed_agreement === "agree"
+                        ? " ✓ agrees"
+                        : result.air_speed_agreement
+                          ? ` ⚠ ${result.air_speed_divergence_pct}% apart`
+                          : ""}
+                    </>
+                  )}
+                </div>
+              )}
+              {sensor.cross_checks?.outdoor_dew_point_c != null && (
+                <div><b>Dew point</b> — {sensor.cross_checks.outdoor_dew_point_c}°C (sensor&apos;s own figure, cross-check only)</div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -331,8 +534,18 @@ export default function DashboardPage() {
                   <label>Placement date</label>
                   <input type="date" value={flockDate} onChange={(e) => setFlockDate(e.target.value)} />
                   <p className="muted" style={{ fontSize: 12 }}>Age today would be day {birdAgeDays(flockDate)}.</p>
-                  <label>Bird count</label>
+                  <label>Birds placed (at day 0)</label>
                   <input type="number" value={flockCount} onChange={(e) => setFlockCount(+e.target.value)} />
+                  <label>Birds alive now</label>
+                  <input type="number" value={liveInput ?? ""} onChange={(e) => setLiveInput(+e.target.value)} />
+                  <p className="muted" style={{ fontSize: 11.5, lineHeight: 1.5, marginBottom: 0 }}>
+                    Enter today's count — PCIS derives cumulative mortality
+                    ({Math.max(0, flockCount - (liveInput ?? flockCount)).toLocaleString()} birds ·{" "}
+                    {flockCount > 0
+                      ? (100 * Math.max(0, flockCount - (liveInput ?? flockCount)) / flockCount).toFixed(1)
+                      : "0"}%)
+                    and uses the live count for all ventilation maths.
+                  </p>
                   <div style={{ display: "flex", gap: 10 }}>
                     <button className="primary" type="submit" style={{ maxWidth: 140, margin: "14px 0 0" }}>Save</button>
                     <button type="button" className="ghost-btn" style={{ marginTop: 14 }} onClick={() => setEditingFlock(false)}>Cancel</button>
@@ -532,9 +745,26 @@ export default function DashboardPage() {
                       <div>💚 Comfort: <b>{advice.comfort_score}%</b></div>
                       <div>📈 Heat stress: <b style={{ color: RISK_COLOR[advice.heat_stress_risk] }}>{advice.heat_stress_risk}</b></div>
                       <div>😮‍💨 Panting: <b>{advice.panting_before} → {advice.panting_after}</b></div>
+                      {/* Two different questions, two different numbers.
+                          The ring shows confidence in the ACTION (how many
+                          fans), which is geometry-driven and well sourced.
+                          The felt-temp and comfort figures above lean on
+                          humidity inputs and are softer — saying so is more
+                          useful than averaging them into one vague score. */}
+                      {advice.metric_confidence != null &&
+                        advice.metric_confidence < advice.confidence && (
+                        <div className="muted" style={{ fontSize: 11 }}>
+                          Comfort figures above: {advice.metric_confidence}% confidence
+                        </div>
+                      )}
                     </div>
-                    <Ring pct={advice.confidence} label="Confidence" />
+                    <Ring pct={advice.confidence} label="Action confidence" />
                   </div>
+                  {advice.confidence_basis && (
+                    <div className="muted" style={{ fontSize: 10.5, marginTop: 8, lineHeight: 1.45 }}>
+                      Based on: {advice.confidence_basis}
+                    </div>
+                  )}
                 </div>
 
                 <button className="primary" style={{ marginTop: 14 }} onClick={() => setAdviceAck(true)} disabled={adviceAck}>
@@ -622,7 +852,11 @@ export default function DashboardPage() {
                   {Math.abs(ph.indoor_rh_pct - inRh) > 10 && <span className="chip warn">gap {Math.abs(ph.indoor_rh_pct - inRh).toFixed(0)}%</span>}
                 </div>
                 <div style={{ display: "flex", gap: 18 }}>
-                  <div><div className="cap">Measured</div><div style={{ fontSize: 22, fontWeight: 700 }}>{inRh}%</div></div>
+                  <div>
+                    <div className="cap">{sensor?.ok ? "Sensor" : "Measured"}</div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: sensor?.ok ? "var(--green-bright)" : undefined }}>{inRh}%</div>
+                    {sensor?.ok && <div className="muted" style={{ fontSize: 10.5 }}>Ecowitt live</div>}
+                  </div>
                   <div><div className="cap">Predicted</div><div style={{ fontSize: 22, fontWeight: 700, color: "var(--blue)" }}>{ph.indoor_rh_pct}%</div></div>
                 </div>
                 <div className="muted" style={{ fontSize: 11.5, marginTop: 10, lineHeight: 1.5 }}>{ph.note}</div>
@@ -634,6 +868,8 @@ export default function DashboardPage() {
               <div className="qa-grid">
                 <div className="qa" onClick={() => setShowConditions(true)}>🌡 Conditions</div>
                 <div className="qa" onClick={() => compute()}>↻ Recalculate</div>
+                <div className="qa" onClick={() => setShowLocation(true)}>📍 Location</div>
+                <div className="qa" onClick={() => setShowSensor(true)}>📡 Sensor</div>
                 <div className="qa" onClick={() => router.push("/houses")}>🏠 Houses</div>
                 <div className="qa" onClick={startEditFlock}>🐤 Edit flock</div>
               </div>
@@ -647,7 +883,23 @@ export default function DashboardPage() {
                   <Row k="Required airflow" v={`${result.required_airflow_m3_per_h.toLocaleString()} m³/h`} />
                   <Row k="Target air speed" v={result.target_airspeed_mps ? `${result.target_airspeed_mps} m/s` : "—"} />
                   <Row k="Heating" v={result.heating_needed ? `${result.heat_deficit_kw} kW` : "off"} />
-                  <Row k="Confidence" v={`${result.confidence_score}/100`} />
+                  {result.measured_air_speed_mps != null && (
+                    <Row
+                      k="Air speed (measured)"
+                      v={`${result.measured_air_speed_mps} m/s${
+                        result.air_speed_agreement === "agree"
+                          ? " ✓"
+                          : result.air_speed_divergence_pct != null
+                            ? ` ⚠ ${result.air_speed_divergence_pct > 0 ? "+" : ""}${result.air_speed_divergence_pct}%`
+                            : ""
+                      }`}
+                    />
+                  )}
+                  {result.moisture_control_limited && result.outdoor_rh_for_drying_pct != null && (
+                    <Row k="Drying resumes below" v={`${result.outdoor_rh_for_drying_pct}% outdoor RH`} />
+                  )}
+                  <Row k="Action confidence" v={`${result.action_confidence}/100`} />
+                  <Row k="Metric confidence" v={`${result.confidence_score}/100`} />
                 </div>
               </div>
             )}

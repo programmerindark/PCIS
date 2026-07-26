@@ -11,15 +11,18 @@ on the web without being re-derived.
 from __future__ import annotations
 
 from pcis.core import advisor as adv
+from pcis.core import wind_chill as wc
 from pcis.core import bird_status as bs
 from pcis.core import comfort_engine as ce
 from pcis.core import digital_twin as twin
 from pcis.core import envelope_presets as ep
 from pcis.core import growth_curve as gc
+from pcis.core import psychrometrics as psy
 from pcis.core import heat_moisture_balance as hmb
 from pcis.core import house_metrics as hmet
 from pcis.core import mortality as mort
 from pcis.core import recommendation_engine as re
+from pcis.core import skov_reference as skov
 from pcis.core import tunnel_geometry as tgeo
 from pcis.equipment.cooling_pad import COOLING_PAD_CATALOG
 from pcis.equipment.fan_curve import FAN_CATALOG
@@ -112,16 +115,30 @@ def _rec_dict(rec: re.Recommendation) -> dict:
         "air_speed_mps": round(rec.air_speed_mps, 2) if rec.air_speed_mps is not None else None,
         "target_airspeed_mps": rec.target_airspeed_mps,
         "effective_temp_c": round(rec.effective_temp_c, 1) if rec.effective_temp_c is not None else None,
+        "felt_band": (
+            wc.felt_temperature_band(
+                rec.achievable_indoor_t_c, rec.air_speed_mps,
+                rec.bird_age_days_used, rec.comfort.rh_pct,
+            )
+            if (rec.air_speed_mps is not None and rec.achievable_indoor_t_c is not None)
+            else None
+        ),
         "vpd_kpa": round(rec.vpd_kpa, 2),
         "achievable_indoor_t_c": round(rec.achievable_indoor_t_c, 1) if rec.achievable_indoor_t_c is not None else None,
         "felt_comfort_index": round(rec.felt_comfort_index, 0) if rec.felt_comfort_index is not None else None,
         "moisture_control_limited": rec.moisture_control_limited,
+        "outdoor_rh_for_drying_pct": rec.outdoor_rh_for_drying_pct,
+        "measured_air_speed_mps": rec.measured_air_speed_mps,
+        "air_speed_agreement": rec.air_speed_agreement,
+        "air_speed_divergence_pct": rec.air_speed_divergence_pct,
         "heating_needed": rec.heating_needed,
         "heat_deficit_kw": round(rec.heat_deficit_w / 1000.0, 1),
         "heater_duty_fraction": rec.heater_duty_fraction,
         "heater_undersized": rec.heater_undersized,
         "target_unreachable": rec.target_unreachable,
         "confidence_score": round(rec.confidence_score, 0),
+        "action_confidence": round(rec.action_confidence, 0),
+        "action_basis": rec.action_basis,
         "comfort": _comfort_dict(rec.comfort),
         "bird_status": _bird_status_dict(bs.from_recommendation(rec)),
         "explanation": rec.explanation,
@@ -129,9 +146,25 @@ def _rec_dict(rec: re.Recommendation) -> dict:
 
 
 def _recommend_obj(payload):
-    """Build the engine Recommendation from a request payload."""
-    weight = gc.ross_308_body_weight_kg(float(payload.bird_age_days))
-    indoor_t = ce.target_temperature(weight, payload.indoor_rh_pct)
+    """Build the engine Recommendation from a request payload.
+
+    Source policy (SKOV fills GAPS, it does not override research):
+
+      * Where a researched/breed-published value exists, PCIS uses it --
+        target temperature (Aviagen target-temp table) and minimum
+        ventilation (Aviagen 2018) both qualify.
+      * Where no researched value exists, PCIS uses the SKOV Viper Touch
+        controller curve -- the age-dependent chill factor and the maximum
+        tunnel air speed are the real gaps it fills.
+
+    The SKOV setpoint is still computed and returned alongside so the
+    operator can see where a working commercial controller would differ.
+    """
+    age = float(payload.bird_age_days)
+    weight = gc.ross_308_body_weight_kg(age)
+    aviagen_t = ce.target_temperature(weight, payload.indoor_rh_pct)
+    indoor_t = aviagen_t                                # researched value wins
+    skov_min_vent = None                                # Aviagen table has this
     rec = re.recommend(
         bird_count=payload.bird_count,
         body_weight_kg=weight,
@@ -146,14 +179,22 @@ def _recommend_obj(payload):
         cooling_pad=COOLING_PAD_CATALOG[0] if payload.cooling_pads else None,
         house_cross_section_m2=payload.width_m * payload.height_m,
         heater_capacity_w=(payload.heater_kw * 1000.0) if payload.heater_kw > 0 else None,
+        bird_age_days=age,                              # age-aware wind chill
+        min_vent_per_bird_override=skov_min_vent,       # SKOV wins
+        # Measured barometric pressure when a sensor supplies it; the
+        # engine falls back to sea level only when nothing is measured.
+        pressure_pa=(payload.pressure_hpa * 100.0
+                     if getattr(payload, "pressure_hpa", None)
+                     else psy.STANDARD_ATM_PRESSURE_PA),
+        measured_air_speed_mps=getattr(payload, "measured_air_speed_mps", None),
     )
-    return rec, weight
+    return rec, weight, aviagen_t
 
 
 def recommend(payload) -> dict:
     """Single-moment recommendation. `payload` is a validated request
     model with attribute access (Pydantic)."""
-    rec, weight = _recommend_obj(payload)
+    rec, weight, aviagen_t = _recommend_obj(payload)
     out = _rec_dict(rec)
     out["body_weight_kg"] = round(weight, 3)
 
@@ -235,6 +276,28 @@ def recommend(payload) -> dict:
         "airflow_per_bird_m3_h": metrics.airflow_per_bird_m3_h,
         "note": metrics.note,
     }
+    # Show where PCIS's two sources disagree (SKOV is being followed).
+    out["setpoint_sources"] = skov.compare_target_temperature(
+        float(payload.bird_age_days), aviagen_target_c=aviagen_t
+    )
+    out["setpoint_sources"]["using"] = "aviagen"
+    out["setpoint_sources"]["policy"] = (
+        "Researched values win; SKOV controller curves fill gaps only "
+        "(age chill factor, max tunnel air speed)."
+    )
+    out["min_vent_source"] = rec.min_vent_source
+    out["min_vent_per_bird_m3_h"] = rec.min_vent_per_bird_m3_h
+
+    # SAFETY CROSS-CHECK: the controller's minimum ventilation is well
+    # below Aviagen's. Air quality is the reason min-vent exists, so the
+    # estimated CO2 is the check on whether that lower rate is safe here.
+    co2 = out["house_metrics"]["estimated_co2_ppm"]
+    if co2 is not None and not out["house_metrics"]["co2_within_guideline"]:
+        out["house_metrics"]["note"] += (
+            f" WARNING: at the controller's lower minimum-ventilation rate the estimated "
+            f"CO2 is {co2:.0f} ppm, above the 3000 ppm guideline — raise minimum ventilation."
+        )
+
     return out
 
 
@@ -255,7 +318,7 @@ def mortality(payload) -> dict:
 
 def advise(payload) -> dict:
     """The AI Advisor: one prioritised action + its predicted effect."""
-    rec, _ = _recommend_obj(payload)
+    rec, _, _ = _recommend_obj(payload)
     a = adv.advise(rec, installed_fans=payload.installed_fans, pads_installed=payload.cooling_pads)
     return {
         "category": a.category,
@@ -263,6 +326,8 @@ def advise(payload) -> dict:
         "detail": a.detail,
         "why": a.why,
         "confidence": round(a.confidence, 0),
+        "metric_confidence": round(a.metric_confidence, 0),
+        "confidence_basis": a.confidence_basis,
         "feel_before_c": round(a.feel_before_c, 1) if a.feel_before_c is not None else None,
         "feel_after_c": round(a.feel_after_c, 1) if a.feel_after_c is not None else None,
         "panting_before": a.panting_before,

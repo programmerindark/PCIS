@@ -39,7 +39,21 @@ class Advice:
     why : str
         The engine's reason (governing factor / key warning).
     confidence : float
-        The engine's confidence score for the underlying numbers.
+        Confidence in the ACTION being recommended -- how well-sourced the
+        decision to run N fans is. This is deliberately NOT the same number
+        as `metric_confidence`: the two answer different questions and
+        conflating them was misleading in both directions.
+
+        Sizing fans is governed by house geometry and a cited air-speed
+        target, both of which we know precisely, so action confidence is
+        high. The felt-temperature and comfort numbers shown alongside lean
+        on humidity inputs and wind-chill scaling, which are softer. An
+        operator deciding whether to trust "run 10 fans" should see the
+        former; one reading "birds feel 18 C" should see the latter.
+    metric_confidence : float
+        Confidence in the displayed comfort/felt-temperature numbers.
+    confidence_basis : str
+        Plain-language reason for the action confidence.
     feel_before_c / feel_after_c : float | None
         Felt (wind-chill) temperature with NO added air movement vs. with
         the recommended fans -- the honest benefit of acting.
@@ -56,6 +70,8 @@ class Advice:
     detail: str
     why: str
     confidence: float
+    metric_confidence: float
+    confidence_basis: str
     feel_before_c: float | None
     feel_after_c: float | None
     panting_before: str
@@ -97,7 +113,12 @@ def advise(rec, installed_fans: int, pads_installed: bool) -> Advice:
         why += " Ventilation cannot cool below the air it is fed — this is a physical limit, not a fan-count issue."
 
     base = dict(
-        confidence=rec.confidence_score,
+        # The advisor's job is to recommend an ACTION, so it quotes the
+        # action confidence. The metric score rides alongside for the
+        # felt-temperature figures rather than being silently substituted.
+        confidence=getattr(rec, "action_confidence", rec.confidence_score),
+        metric_confidence=rec.confidence_score,
+        confidence_basis=getattr(rec, "action_basis", "") or "",
         feel_before_c=before.effective_bird_temp_c,
         feel_after_c=after.effective_bird_temp_c,
         panting_before=before.panting_index,
@@ -122,14 +143,46 @@ def advise(rec, installed_fans: int, pads_installed: bool) -> Advice:
                       detail=f"The house is losing more heat than the birds make; heat is needed to hold {target:.1f}°C.",
                       why=why, **base)
 
-    # 2) Fan shortfall: name it, but still say what to run now.
+    # 2) Ventilation cannot dehumidify.
+    #
+    # Placed above the fan-shortfall branch deliberately. When the outside
+    # air is as wet as the house air, "you need more fans" is true but
+    # useless: more fans would not dry anything, and buying them is not a
+    # decision anyone makes this afternoon. The moisture message is the
+    # one with same-day actions attached, so it goes first -- EXCEPT when
+    # the birds are actually heat-stressed, in which case cooling
+    # outranks everything and the branches below take over.
+    heat_urgent = after.heat_stress_risk in ("High", "Severe")
+    if getattr(rec, "moisture_control_limited", False) and not heat_urgent:
+        threshold = getattr(rec, "outdoor_rh_for_drying_pct", None)
+        if threshold is not None:
+            when = (f"Drying resumes once outdoor humidity falls below "
+                    f"~{threshold:.0f}% — watch for that on the forecast.")
+        else:
+            when = ("Outside air cannot dry this house at any humidity while "
+                    "it stays this warm.")
+        return Advice(
+            category="moisture_limited",
+            headline=f"Run {min(fans, installed_fans) if installed_fans else fans} fans for air quality — not for drying",
+            detail=(
+                "The air outside holds as much water as the air inside, so "
+                "ventilating cannot lower humidity right now — it can even "
+                "raise it. Keep fans running for CO2 and ammonia, but treat "
+                "wet litter at the source: check drinker lines for leaks and "
+                "spillage, and stir or top up caked litter. " + when
+            ),
+            why=why + " Moisture, not heat, is the binding constraint.",
+            **base,
+        )
+
+    # 3) Fan shortfall: name it, but still say what to run now.
     if short:
         return Advice(category="capacity",
                       headline=f"Run all {installed_fans} fans — capacity short",
                       detail=f"Conditions call for {fans} fans but only {installed_fans} are installed; add capacity to fully cool the birds.",
                       why=why, **base)
 
-    # 3) Comfortable and safe: hold.
+    # 4) Comfortable and safe: hold.
     comfortable = after.heat_stress_risk == "Low" and after.comfort_label in ("Good", "Fair") and not rec.target_unreachable
     if comfortable and not rec.pads_on and (rec.target_airspeed_mps is None):
         return Advice(category="hold",
@@ -137,21 +190,21 @@ def advise(rec, installed_fans: int, pads_installed: bool) -> Advice:
                       detail=f"Run {fans} fan(s); comfort is {after.comfort_score:.0f}% and heat-stress is low.",
                       why=why, **base)
 
-    # 4) Tunnel cooling by air speed (feathered birds in heat).
+    # 5) Tunnel cooling by air speed (feathered birds in heat).
     if rec.target_airspeed_mps and rec.target_airspeed_mps > 0:
         return Advice(category="cooling_airspeed",
                       headline=f"Run {fans} of {installed_fans} fans for tunnel cooling",
                       detail=f"Push air over the birds at ~{rec.target_airspeed_mps:g} m/s — wind-chill drops the felt temperature.",
                       why=why, **base)
 
-    # 5) Evaporative pad cooling is doing the work.
+    # 6) Evaporative pad cooling is doing the work.
     if rec.pads_on:
         return Advice(category="cooling_pads",
                       headline=f"Run cooling pads + {fans} fans",
                       detail="Humidity is low enough that evaporative pads cool effectively.",
                       why=why, **base)
 
-    # 6) Plain ventilation.
+    # 7) Plain ventilation.
     return Advice(category="ventilation",
                   headline=f"Run {fans} of {installed_fans} fans",
                   detail="Ventilate for heat, moisture and air quality.",

@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app import ecowitt as ecowitt_client
 from backend.app import engine_api
-from backend.app.schemas import MortalityRequest, RecommendRequest, ScheduleRequest
+from backend.app.schemas import (
+    EcowittCloudRequest, EcowittKeysRequest, EcowittLocalRequest,
+    MortalityRequest, RecommendRequest, ScheduleRequest,
+)
 
 app = FastAPI(
     title="PCIS API",
@@ -91,3 +95,101 @@ def advise(req: RecommendRequest) -> dict:
 def mortality(req: MortalityRequest) -> dict:
     """Assess flock mortality vs the cited EU cumulative-mortality ceiling."""
     return engine_api.mortality(req)
+
+
+@app.post("/sensor/ecowitt/cloud")
+async def ecowitt_cloud(req: EcowittCloudRequest) -> dict:
+    """Live house conditions from an Ecowitt gateway via the cloud API."""
+    try:
+        res = await ecowitt_client.fetch_cloud(
+            req.application_key, req.api_key, req.mac, include_raw=req.include_raw
+        )
+    except Exception as exc:  # transport / DNS / timeout
+        return {"ok": False, "error": f"Could not reach Ecowitt: {exc}", "blocks": {}}
+    picked = ecowitt_client.select_house_conditions(
+        res["blocks"], req.indoor_block, req.outdoor_block
+    )
+    return {
+        "ok": res["raw_code"] == 0 and picked["indoor_t_c"] is not None,
+        "error": None if res["raw_code"] == 0 else res["message"],
+        "blocks": res["blocks"],
+        "pressure_hpa": res.get("pressure_hpa"),
+        "cross_checks": res.get("cross_checks"),
+        "raw": res.get("raw"),
+        **picked,
+    }
+
+
+@app.post("/sensor/ecowitt/local")
+async def ecowitt_local(req: EcowittLocalRequest) -> dict:
+    """Live house conditions straight from the gateway on the farm LAN."""
+    try:
+        res = await ecowitt_client.fetch_local(req.gateway_ip)
+    except Exception as exc:
+        return {"ok": False, "error": f"Could not reach gateway: {exc}", "blocks": {}}
+    picked = ecowitt_client.select_house_conditions(
+        res["blocks"], req.indoor_block, req.outdoor_block
+    )
+    return {"ok": picked["indoor_t_c"] is not None, "error": None,
+            "blocks": res["blocks"], **picked}
+
+
+@app.post("/sensor/ecowitt/devices")
+async def ecowitt_devices(req: EcowittKeysRequest) -> dict:
+    """List gateways on the account so the user need not find a MAC."""
+    try:
+        return await ecowitt_client.list_devices(req.application_key, req.api_key)
+    except Exception as exc:
+        return {"devices": [], "message": f"Could not reach Ecowitt: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Browser-friendly GET variants.
+# Pasting JSON by hand is error-prone (a stray newline inside a copied key
+# produces "Invalid control character"), so these accept plain query
+# parameters and can be opened directly in a browser address bar.
+# ---------------------------------------------------------------------------
+
+def _clean(v: str) -> str:
+    """Strip whitespace/newlines that survive a copy-paste."""
+    return "".join(v.split())
+
+
+@app.get("/sensor/ecowitt/devices")
+async def ecowitt_devices_get(
+    application_key: str = Query(...),
+    api_key: str = Query(...),
+) -> dict:
+    try:
+        return await ecowitt_client.list_devices(_clean(application_key), _clean(api_key))
+    except Exception as exc:
+        return {"devices": [], "message": f"Could not reach Ecowitt: {exc}"}
+
+
+@app.get("/sensor/ecowitt/cloud")
+async def ecowitt_cloud_get(
+    application_key: str = Query(...),
+    api_key: str = Query(...),
+    mac: str = Query(...),
+    indoor_block: str = Query("outdoor"),
+    outdoor_block: str | None = Query(None),
+    include_raw: bool = Query(True),
+) -> dict:
+    try:
+        res = await ecowitt_client.fetch_cloud(
+            _clean(application_key), _clean(api_key), _clean(mac), include_raw=include_raw
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"Could not reach Ecowitt: {exc}", "blocks": {}}
+    picked = ecowitt_client.select_house_conditions(
+        res["blocks"], indoor_block, outdoor_block
+    )
+    return {
+        "ok": res["raw_code"] == 0 and picked["indoor_t_c"] is not None,
+        "error": None if res["raw_code"] == 0 else res["message"],
+        "blocks": res["blocks"],
+        "pressure_hpa": res.get("pressure_hpa"),
+        "cross_checks": res.get("cross_checks"),
+        "raw": res.get("raw"),
+        **picked,
+    }

@@ -6,6 +6,11 @@ export type Farm = {
   location: string | null;
   latitude: number | null;
   longitude: number | null;
+  ecowitt_application_key?: string | null;
+  ecowitt_api_key?: string | null;
+  ecowitt_mac?: string | null;
+  ecowitt_indoor_block?: string | null;
+  ecowitt_gateway_ip?: string | null;
 };
 
 export type Insulation = "uninsulated" | "insulated" | "well_insulated";
@@ -110,10 +115,21 @@ export type RecommendResponse = {
   achievable_indoor_t_c: number | null;
   felt_comfort_index: number | null;
   moisture_control_limited: boolean;
+  /** Outdoor RH below which ventilation starts drying the house again. */
+  outdoor_rh_for_drying_pct: number | null;
+  /** Anemometer reading from inside the house, when a sensor supplies one. */
+  measured_air_speed_mps: number | null;
+  /** "agree" | "measured_lower" | "measured_higher" */
+  air_speed_agreement: string | null;
+  air_speed_divergence_pct: number | null;
   heating_needed: boolean;
   heat_deficit_kw: number;
   target_unreachable: boolean;
+  /** Confidence in the METRICS (felt temp, comfort). */
   confidence_score: number;
+  /** Confidence in the ACTION (how many fans to run) — usually higher. */
+  action_confidence: number;
+  action_basis: string;
   comfort: Comfort;
   bird_status: BirdStatus;
   explanation: string[];
@@ -178,7 +194,11 @@ export type AdviseResponse = {
   headline: string;
   detail: string;
   why: string;
+  /** Confidence in the recommended ACTION — what the headline number means. */
   confidence: number;
+  /** Confidence in the felt-temperature / comfort figures shown alongside. */
+  metric_confidence: number;
+  confidence_basis: string;
   feel_before_c: number | null;
   feel_after_c: number | null;
   panting_before: string;

@@ -63,7 +63,31 @@ def test_mild_conditions_hold():
     assert a.category == "hold"
 
 
-def test_confidence_passes_through():
+def test_headline_confidence_is_the_ACTION_confidence():
+    """The advisor recommends an action, so it must quote action confidence.
+
+    These were once the same number, which flattered the felt-temperature
+    figures and understated the fan-count decision at the same time. The
+    engine now scores them separately: sizing fans is governed by house
+    geometry and a cited air-speed target (well known), while comfort
+    metrics depend on humidity inputs (softer). The advisor's headline
+    answers "should I trust this instruction", so it takes the former.
+    """
     r = _rec(outdoor_t_c=31)
     a = advisor.advise(r, installed_fans=15, pads_installed=False)
-    assert a.confidence == r.confidence_score
+    assert a.confidence == r.action_confidence
+
+
+def test_metric_confidence_is_carried_alongside_not_discarded():
+    """The comfort numbers on the same card still need their own score."""
+    r = _rec(outdoor_t_c=31)
+    a = advisor.advise(r, installed_fans=15, pads_installed=False)
+    assert a.metric_confidence == r.confidence_score
+
+
+def test_the_two_scores_are_reported_independently():
+    r = _rec(outdoor_t_c=31)
+    a = advisor.advise(r, installed_fans=15, pads_installed=False)
+    assert a.confidence_basis  # the action score explains itself
+    if r.action_confidence != r.confidence_score:
+        assert a.confidence != a.metric_confidence

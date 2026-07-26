@@ -103,6 +103,16 @@ CONFIDENCE_DEDUCTION_PAD_100MM_DESIGN_POINT = 25.0
 CONFIDENCE_DEDUCTION_CO2_DEFAULT_OUTDOOR_PPM = 10.0
 CONFIDENCE_DEDUCTION_COMPOSITE_COMFORT_INDEX = 5.0
 CONFIDENCE_DEDUCTION_RH_OUTSIDE_TABLE_RANGE = 10.0
+CONFIDENCE_DEDUCTION_WINDCHILL_HIGH_RH = 10.0
+
+#: Fractional disagreement between computed and measured tunnel air speed
+#: beyond which PCIS stops treating them as the same number and says so.
+#: A single anemometer reads one point in a house, not a cross-sectional
+#: average, so perfect agreement is not expected and small gaps are not
+#: errors. 25% is PCIS engineering judgment: wide enough to tolerate
+#: normal sensor placement, narrow enough to catch a blocked inlet,
+#: a stalled fan, or a cross-section that is not what was entered.
+AIR_SPEED_DIVERGENCE_FRACTION = 0.25
 
 
 @dataclass(frozen=True)
@@ -188,15 +198,35 @@ class Recommendation:
     supply_air_rh_pct: float
     comfort: ce.ComfortAssessment
     confidence_score: float
+    bird_age_days_used: float | None = None
+    action_confidence: float = 100.0
+    action_basis: str = ""
     target_unreachable: bool = False
     delivered_airflow_m3_per_h: float | None = None
     cross_section_area_m2: float | None = None
     air_speed_mps: float | None = None
+    #: Anemometer reading from inside the house, when one is available.
+    #: PCIS never substitutes this for the computed value: the computed
+    #: figure is what the fan curve and geometry imply, the measurement is
+    #: what one point in the house actually experiences, and a gap between
+    #: them is diagnostic information rather than an error to paper over.
+    measured_air_speed_mps: float | None = None
+    #: "agree" | "measured_lower" | "measured_higher" | None
+    air_speed_agreement: str | None = None
+    air_speed_divergence_pct: float | None = None
     effective_temp_c: float | None = None
     target_airspeed_mps: float | None = None
     vpd_kpa: float = 0.0
     achievable_indoor_t_c: float | None = None
     moisture_control_limited: bool = False
+    #: Outdoor RH (%) below which ventilation resumes removing moisture,
+    #: or None when no such threshold applies. Turns the dead-end
+    #: "ventilation cannot dehumidify" into something the operator can
+    #: watch for on a forecast.
+    outdoor_rh_for_drying_pct: float | None = None
+    felt_temp_optimistic: bool = False
+    min_vent_source: str = "aviagen"
+    min_vent_per_bird_m3_h: float | None = None
     felt_comfort_index: float | None = None
     heating_needed: bool = False
     heat_deficit_w: float = 0.0
@@ -220,6 +250,10 @@ def recommend(
     outdoor_co2_ppm: float = 420.0,
     house_cross_section_m2: float | None = None,
     heater_capacity_w: float | None = None,
+    bird_age_days: float | None = None,
+    min_vent_per_bird_override: float | None = None,
+    pressure_pa: float = psy.STANDARD_ATM_PRESSURE_PA,
+    measured_air_speed_mps: float | None = None,
 ) -> Recommendation:
     """Produce a fan-staging / pad on/off recommendation.
 
@@ -352,14 +386,21 @@ def recommend(
     requirements: dict[str, float] = {}
     if net.net_sensible_w > 0:
         requirements["sensible_heat"] = vs.required_airflow_for_sensible_heat(
-            net.net_sensible_w, delta_t_c, supply_t_c, supply_rh_pct
+            net.net_sensible_w, delta_t_c, supply_t_c, supply_rh_pct, p_pa=pressure_pa
         )
     # Moisture: evaluated at the achievable indoor state (the exhaust air
     # is at the temperature the house actually holds), and guarded against
     # the near-singularity described at MOISTURE_MIN_HUMIDITY_RATIO_DIFF.
-    w_target = psy.humidity_ratio_from_relative_humidity(achievable_indoor_t_c, indoor_rh_pct)
-    w_supply = psy.humidity_ratio_from_relative_humidity(supply_t_c, supply_rh_pct)
+    w_target = psy.humidity_ratio_from_relative_humidity(achievable_indoor_t_c, indoor_rh_pct, pressure_pa)
+    w_supply = psy.humidity_ratio_from_relative_humidity(supply_t_c, supply_rh_pct, pressure_pa)
     moisture_control_limited = (w_target - w_supply) < MOISTURE_MIN_HUMIDITY_RATIO_DIFF
+    outdoor_rh_for_drying_pct = (
+        vs.outdoor_rh_threshold_for_drying(
+            achievable_indoor_t_c, indoor_rh_pct, supply_t_c, pressure_pa,
+            MOISTURE_MIN_HUMIDITY_RATIO_DIFF,
+        )
+        if moisture_control_limited else None
+    )
     if moisture_control_limited:
         explanation.append(
             f"Moisture: incoming air ({w_supply * 1000:.1f} g/kg) is nearly as humid as "
@@ -373,7 +414,7 @@ def recommend(
         try:
             requirements["moisture"] = vs.required_airflow_for_moisture(
                 net.moisture_kg_per_h, achievable_indoor_t_c, indoor_rh_pct,
-                supply_t_c, supply_rh_pct,
+                supply_t_c, supply_rh_pct, p_pa=pressure_pa,
             )
         except ValueError:
             pass  # supply air already more humid than indoor target; moisture doesn't govern
@@ -385,7 +426,23 @@ def recommend(
             "using the default 420 ppm outdoor CO2 background rather than a "
             "locally measured value."
         )
-    min_vent_per_bird = vs.minimum_ventilation_rate_aviagen(body_weight_kg)
+    # Minimum ventilation: the caller may supply a rate from another
+    # source (e.g. a SKOV controller curve). PCIS records which was used
+    # and never silently substitutes one for the other.
+    aviagen_min_vent = vs.minimum_ventilation_rate_aviagen(body_weight_kg)
+    if min_vent_per_bird_override is not None and min_vent_per_bird_override > 0:
+        min_vent_per_bird = min_vent_per_bird_override
+        min_vent_source = "controller"
+        if min_vent_per_bird < aviagen_min_vent:
+            explanation.append(
+                f"Minimum ventilation {min_vent_per_bird:.2f} m3/h/bird (controller curve) is "
+                f"BELOW the Aviagen figure of {aviagen_min_vent:.2f}. Using the controller value "
+                "as instructed — check the estimated CO2 reading, which is the air-quality "
+                "cross-check on this choice."
+            )
+    else:
+        min_vent_per_bird = aviagen_min_vent
+        min_vent_source = "aviagen"
     min_ventilation_m3_per_h = min_vent_per_bird * bird_count
     requirements["minimum_ventilation"] = min_ventilation_m3_per_h
 
@@ -481,7 +538,14 @@ def recommend(
         # a hot day the target is unreachable and reporting the felt
         # temperature relative to it would understate what the birds
         # experience by many degrees.
-        effective_temp_c = wc.effective_temperature_c(achievable_indoor_t_c, air_speed_mps)
+        if bird_age_days is not None:
+            # Young birds feel substantially more chill from the same air
+            # speed (SKOV chill curve; ~3.2x for a day-old chick).
+            effective_temp_c = wc.effective_temperature_for_age_c(
+                achievable_indoor_t_c, air_speed_mps, bird_age_days
+            )
+        else:
+            effective_temp_c = wc.effective_temperature_c(achievable_indoor_t_c, air_speed_mps)
         drop = achievable_indoor_t_c - effective_temp_c
         if drop > 0.05:
             explanation.append(
@@ -502,6 +566,28 @@ def recommend(
             )
         # Young-chick chill guard: the delivered velocity must stay below
         # the cited 0.15 m/s ceiling for small birds.
+        # Humidity caveat: the cited anchor is at "average humidity".
+        # Panting is evaporative, so in near-saturated air the same air
+        # speed relieves the birds LESS than this estimate implies.
+        if wc.windchill_estimate_is_optimistic(indoor_rh_pct) and drop > 0.5:
+            confidence -= CONFIDENCE_DEDUCTION_WINDCHILL_HIGH_RH
+            explanation.append(
+                f"-{CONFIDENCE_DEDUCTION_WINDCHILL_HIGH_RH:.0f} confidence: felt temperature "
+                f"is OPTIMISTIC at {indoor_rh_pct:.0f}% RH. Aviagen's wind-chill anchor was "
+                "measured at average humidity; birds cool by panting, which is evaporative, "
+                "so in near-saturated air the birds feel WARMER than the "
+                f"{effective_temp_c:.1f}C shown. No published correction factor exists, so "
+                "PCIS flags this rather than inventing one — trust the THI reading and bird "
+                "behaviour over the felt-temperature figure here."
+            )
+        if bird_age_days is not None and bird_age_days <= 14 and drop > 1.0:
+            explanation.append(
+                f"CHILL RISK: at {bird_age_days:g} days these birds feel about {drop:.1f}C of "
+                f"wind-chill at {air_speed_mps:.2f} m/s — roughly "
+                f"{__import__('pcis.core.skov_reference', fromlist=['x']).chill_sensitivity_ratio(bird_age_days):.1f}x "
+                "what a fully-feathered bird would feel [SKOV chill curve]. Young birds chill "
+                "easily; verify by their behaviour (huddling = too cold)."
+            )
         if target_air.ceiling_mps is not None and air_speed_mps > target_air.ceiling_mps:
             explanation.append(
                 f"WARNING: delivered air speed {air_speed_mps:.2f} m/s exceeds the "
@@ -511,8 +597,8 @@ def recommend(
             )
 
     # --- Comfort assessment ---------------------------------------------
-    w_indoor = psy.humidity_ratio_from_relative_humidity(achievable_indoor_t_c, indoor_rh_pct)
-    twb_indoor = psy.wet_bulb_temperature(achievable_indoor_t_c, w_indoor)
+    w_indoor = psy.humidity_ratio_from_relative_humidity(achievable_indoor_t_c, indoor_rh_pct, pressure_pa)
+    twb_indoor = psy.wet_bulb_temperature(achievable_indoor_t_c, w_indoor, pressure_pa)
     vpd_kpa = psy.vapor_pressure_deficit(achievable_indoor_t_c, indoor_rh_pct)
     explanation.append(
         f"Vapor-pressure deficit (VPD) at {achievable_indoor_t_c:.1f}C/{indoor_rh_pct:.0f}% RH = "
@@ -532,6 +618,35 @@ def recommend(
         f"({comfort.thi_class}), comfort_index={comfort.comfort_index:.0f}/100."
     )
 
+    # ------------------------------------------------------------------
+    # ACTION confidence vs METRIC confidence
+    # ------------------------------------------------------------------
+    # The existing score measures how well-sourced the DISPLAYED NUMBERS
+    # are. That is not the same question as "how sure are we about the
+    # advice", and conflating them undersells decisions that are in fact
+    # certain: at high RH the felt-temperature deductions drag the score
+    # to 65 even when the fan count is driven purely by geometry and a
+    # cited air-speed target, and does not move at all when RH, outdoor
+    # temperature or insulation are varied.
+    #
+    # Action confidence therefore scores only the inputs the GOVERNING
+    # constraint actually depends on.
+    _GOVERNING_INPUT_QUALITY = {
+        # constraint          -> (score, what it rests on)
+        "target_airspeed":    (95.0, "house geometry + cited air-speed target"),
+        "minimum_ventilation":(90.0, "published Aviagen minimum-ventilation table"),
+        "sensible_heat":      (80.0, "bird heat (CIGR) + envelope U-values"),
+        "co2":                (70.0, "CIGR CO2 output + assumed outdoor background"),
+        "moisture":           (70.0, "moisture balance, sensitive to humidity inputs"),
+    }
+    action_confidence, action_basis = _GOVERNING_INPUT_QUALITY.get(
+        governing_constraint, (70.0, "engine model")
+    )
+    # The fan curve is manufacturer data; a static pressure outside its
+    # tested range would be the one thing that undermines any constraint.
+    if target_unreachable:
+        action_basis += "; target unreachable, so this is 'run what you have'"
+
     # Comfort re-scored at the FELT temperature (what moving air actually
     # buys the birds). Reported alongside the dry-bulb comfort index; it
     # inherits the wind-chill ESTIMATE caveat, so it is a second opinion,
@@ -545,6 +660,58 @@ def recommend(
     else:
         felt_comfort_index = comfort.comfort_index
 
+    # --- Measured vs computed air speed ---------------------------------
+    # An anemometer inside the house reads the air the fans are actually
+    # moving. Comparing it with the continuity calculation turns the most
+    # load-bearing number in the engine -- the one governing most
+    # recommendations -- from a prediction into a checked prediction.
+    air_speed_agreement: str | None = None
+    air_speed_divergence_pct: float | None = None
+    if (measured_air_speed_mps is not None and air_speed_mps is not None
+            and air_speed_mps > 0):
+        frac = (measured_air_speed_mps - air_speed_mps) / air_speed_mps
+        air_speed_divergence_pct = round(frac * 100.0, 1)
+        if abs(frac) <= AIR_SPEED_DIVERGENCE_FRACTION:
+            air_speed_agreement = "agree"
+            explanation.append(
+                f"Air speed cross-check: computed {air_speed_mps:.2f} m/s vs "
+                f"measured {measured_air_speed_mps:.2f} m/s "
+                f"({air_speed_divergence_pct:+.0f}%). Within tolerance -- the "
+                "fan-curve and cross-section assumptions are behaving as expected."
+            )
+        else:
+            air_speed_agreement = ("measured_lower" if frac < 0 else "measured_higher")
+            if frac < 0:
+                cause = (
+                    "Measured air speed is well BELOW the calculation. Common "
+                    "causes: fans not all running or belt-slipping, dirty "
+                    "shutters or guards, blocked inlets raising static pressure "
+                    "above the design figure, or leakage short-circuiting the "
+                    "tunnel. Worth checking before trusting the fan count."
+                )
+            else:
+                cause = (
+                    "Measured air speed is well ABOVE the calculation. The most "
+                    "likely explanation is that the true cross-section is "
+                    "smaller than the value entered (a dropped ceiling, or "
+                    "stored equipment narrowing the house), or that the "
+                    "anemometer sits in a locally fast spot rather than in "
+                    "average flow."
+                )
+            explanation.append(
+                f"AIR SPEED DISAGREEMENT: computed {air_speed_mps:.2f} m/s vs "
+                f"measured {measured_air_speed_mps:.2f} m/s "
+                f"({air_speed_divergence_pct:+.0f}%). {cause}"
+            )
+
+    if abs(pressure_pa - psy.STANDARD_ATM_PRESSURE_PA) > 1500:
+        explanation.append(
+            f"Using measured barometric pressure {pressure_pa/100:.0f} hPa (not sea level). "
+            f"Air is {100*(1-pressure_pa/psy.STANDARD_ATM_PRESSURE_PA):.0f}% thinner, so each m3 a fan "
+            "moves carries less mass -- humidity ratios and heat-removal capacity are "
+            "corrected for this."
+        )
+
     confidence = max(0.0, min(100.0, confidence))
 
     return Recommendation(
@@ -556,6 +723,9 @@ def recommend(
         supply_air_rh_pct=supply_rh_pct,
         comfort=comfort,
         confidence_score=confidence,
+        bird_age_days_used=bird_age_days,
+        action_confidence=round(action_confidence, 0),
+        action_basis=action_basis,
         target_unreachable=target_unreachable,
         delivered_airflow_m3_per_h=delivered_airflow,
         cross_section_area_m2=house_cross_section_m2,
@@ -569,6 +739,13 @@ def recommend(
         vpd_kpa=vpd_kpa,
         achievable_indoor_t_c=achievable_indoor_t_c,
         moisture_control_limited=moisture_control_limited,
+        measured_air_speed_mps=measured_air_speed_mps,
+        air_speed_agreement=air_speed_agreement,
+        air_speed_divergence_pct=air_speed_divergence_pct,
+        outdoor_rh_for_drying_pct=outdoor_rh_for_drying_pct,
+        felt_temp_optimistic=(wc.windchill_estimate_is_optimistic(indoor_rh_pct) and effective_temp_c is not None),
+        min_vent_source=min_vent_source,
+        min_vent_per_bird_m3_h=round(min_vent_per_bird, 3),
         felt_comfort_index=felt_comfort_index,
         heating_needed=heat_req.heating_needed,
         heat_deficit_w=heat_req.heat_deficit_w,

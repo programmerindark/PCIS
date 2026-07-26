@@ -343,3 +343,61 @@ def required_fan_count(required_airflow_m3_per_h: float, fan_airflow_m3_per_h: f
     if fan_airflow_m3_per_h <= 0:
         raise ValueError("fan_airflow_m3_per_h must be positive")
     return math.ceil(required_airflow_m3_per_h / fan_airflow_m3_per_h)
+
+
+#: Minimum humidity-ratio gradient (kg water / kg dry air) for ventilation
+#: to be a practical moisture-removal mechanism. Mirrors
+#: `recommendation_engine.MOISTURE_MIN_HUMIDITY_RATIO_DIFF`; defined here
+#: too so this module stays importable on its own. PCIS engineering
+#: judgment, not a literature value.
+DRYING_MIN_HUMIDITY_RATIO_DIFF = 0.0005
+
+
+def outdoor_rh_threshold_for_drying(
+    indoor_t_c: float,
+    indoor_rh_pct: float,
+    outdoor_t_c: float,
+    p_pa: float = psy.STANDARD_ATM_PRESSURE_PA,
+    min_diff: float = DRYING_MIN_HUMIDITY_RATIO_DIFF,
+) -> float | None:
+    """Outdoor RH below which ventilation starts removing moisture again.
+
+    Ventilation dries a house only when the incoming air holds less water
+    per kg of dry air than the house air does. In humid weather that
+    gradient can vanish or reverse, at which point running more fans adds
+    water instead of removing it.
+
+    Rather than leaving the operator with "ventilation cannot dehumidify"
+    and no idea how long that will last, this returns the outdoor relative
+    humidity at which drying resumes -- a single number they can watch on
+    a forecast or a sensor.
+
+    Returns None when the outdoor air is so much colder than the house
+    that it can never carry enough moisture to matter, or when drying
+    already works at any humidity (threshold >= 100%).
+    """
+    w_indoor = psy.humidity_ratio_from_relative_humidity(
+        indoor_t_c, indoor_rh_pct, p_pa
+    )
+    target_w = w_indoor - min_diff
+    if target_w <= 0:
+        return None
+
+    # Already drying at saturated outdoor air: no threshold to report.
+    w_at_saturation = psy.humidity_ratio_from_relative_humidity(
+        outdoor_t_c, 100.0, p_pa
+    )
+    if w_at_saturation <= target_w:
+        return None
+
+    # Humidity ratio rises monotonically with RH at fixed temperature and
+    # pressure, so a bisection is exact to within the tolerance below.
+    lo, hi = 0.0, 100.0
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        w_mid = psy.humidity_ratio_from_relative_humidity(outdoor_t_c, mid, p_pa)
+        if w_mid > target_w:
+            hi = mid
+        else:
+            lo = mid
+    return round(lo, 1)

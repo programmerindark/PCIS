@@ -6,6 +6,32 @@ export type WxPoint = { label: string; t_c: number; rh_pct: number };
 
 const BASE = "https://api.open-meteo.com/v1/forecast";
 
+export type Place = {
+  name: string;
+  admin1?: string;
+  country?: string;
+  latitude: number;
+  longitude: number;
+};
+
+/** Search places by name (Open-Meteo geocoding — free, no key).
+ *  Lets an operator set the FARM's location while away from it. */
+export async function searchPlaces(query: string): Promise<Place[]> {
+  const q = query.trim();
+  if (q.length < 2) return [];
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=6&language=en&format=json`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("Place search failed");
+  const j = await r.json();
+  return (j.results ?? []).map((p: any) => ({
+    name: p.name,
+    admin1: p.admin1,
+    country: p.country,
+    latitude: p.latitude,
+    longitude: p.longitude,
+  }));
+}
+
 export async function getCurrentWeather(lat: number, lon: number): Promise<CurrentWx> {
   const url = `${BASE}?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m`;
   const r = await fetch(url);

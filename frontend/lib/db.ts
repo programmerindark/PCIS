@@ -144,9 +144,39 @@ export async function getMortalitySummary(flockId: string): Promise<MortalitySum
   return { cumulative_dead, today_dead };
 }
 
-export async function logMortality(flockId: string, dead: number): Promise<void> {
-  const { error } = await supabase.from("mortality").insert({ flock_id: flockId, dead });
+export async function logMortality(flockId: string, dead: number, note?: string): Promise<void> {
+  const { error } = await supabase.from("mortality").insert({ flock_id: flockId, dead, note });
   if (error) throw error;
+}
+
+/** Set the CURRENT live bird count directly.
+ *
+ * Farmers often know how many birds are alive right now but not the
+ * running total of losses (e.g. taking over a flock mid-cycle). This
+ * reconciles by writing one adjustment row so that
+ * placed - sum(mortality) == the live count entered. */
+export async function setLiveCount(
+  flockId: string,
+  placed: number,
+  liveNow: number
+): Promise<void> {
+  const live = Math.max(0, Math.min(placed, Math.round(liveNow)));
+  const { cumulative_dead } = await getMortalitySummary(flockId);
+  const targetDead = placed - live;
+  const delta = targetDead - cumulative_dead;
+  if (delta === 0) return;
+  if (delta > 0) {
+    await logMortality(flockId, delta, "adjustment: live count set by operator");
+  } else {
+    // Live count is HIGHER than our records imply -> previous losses were
+    // over-recorded. Store a negative-offset row is not allowed (dead >= 0),
+    // so clear the log and write the reconciled total instead.
+    const { error } = await supabase.from("mortality").delete().eq("flock_id", flockId);
+    if (error) throw error;
+    if (targetDead > 0) {
+      await logMortality(flockId, targetDead, "adjustment: live count set by operator");
+    }
+  }
 }
 
 /** Bird age in days from the placement date, clamped to the engine's
@@ -156,6 +186,19 @@ export function birdAgeDays(placementDate: string): number {
   const now = new Date();
   const days = Math.floor((now.getTime() - placed.getTime()) / 86_400_000);
   return Math.max(0, Math.min(56, days));
+}
+
+export async function updateFarmSensor(
+  farmId: string,
+  fields: {
+    ecowitt_application_key?: string | null;
+    ecowitt_api_key?: string | null;
+    ecowitt_mac?: string | null;
+    ecowitt_indoor_block?: string | null;
+  }
+): Promise<void> {
+  const { error } = await supabase.from("farms").update(fields).eq("id", farmId);
+  if (error) throw error;
 }
 
 export async function updateFarmLocation(

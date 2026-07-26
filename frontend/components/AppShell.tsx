@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { useUnits } from "@/lib/units";
 
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: "⌂" },
@@ -24,6 +25,7 @@ export default function AppShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [units, setUnits] = useUnits();
   const initials = (email ?? "U").slice(0, 2).toUpperCase();
   const now = new Date();
 
@@ -81,6 +83,14 @@ export default function AppShell({
                 {now.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
               </div>
             </div>
+            <div className="divider-v" />
+            <button
+              className="ghost-btn"
+              title="Switch display units (data is always stored in SI)"
+              onClick={() => setUnits(units === "metric" ? "imperial" : "metric")}
+            >
+              {units === "metric" ? "m · °C" : "ft · °F"}
+            </button>
             <div className="divider-v" />
             <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
               <div className="avatar">{initials}</div>
