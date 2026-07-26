@@ -64,8 +64,41 @@ export type HouseMetrics = {
   note: string;
 };
 
+export type PredictedHumidity = {
+  indoor_rh_pct: number;
+  indoor_humidity_ratio_g_per_kg: number;
+  supply_humidity_ratio_g_per_kg: number;
+  moisture_added_g_per_kg: number;
+  saturated: boolean;
+  note: string;
+};
+
+export type CeilingOption = {
+  ceiling_height_m: number;
+  cross_section_m2: number;
+  velocity_mps: number;
+  velocity_fpm: number;
+  meets_tunnel_target: boolean;
+  windchill_effective: boolean;
+};
+
+export type TunnelGeometry = {
+  current_velocity_mps: number;
+  target_velocity_mps: number;
+  meets_target: boolean;
+  required_cross_section_m2: number;
+  required_ceiling_height_m: number | null;
+  current_ceiling_height_m: number | null;
+  ceiling_drop_m: number | null;
+  fans_needed_instead: number | null;
+  note: string;
+  options: CeilingOption[];
+};
+
 export type RecommendResponse = {
   house_metrics?: HouseMetrics;
+  predicted_humidity?: PredictedHumidity | null;
+  tunnel_geometry?: TunnelGeometry;
   fans_on: number;
   pads_on: boolean;
   governing_constraint: string;
@@ -74,6 +107,9 @@ export type RecommendResponse = {
   target_airspeed_mps: number | null;
   effective_temp_c: number | null;
   vpd_kpa: number;
+  achievable_indoor_t_c: number | null;
+  felt_comfort_index: number | null;
+  moisture_control_limited: boolean;
   heating_needed: boolean;
   heat_deficit_kw: number;
   target_unreachable: boolean;
@@ -100,8 +136,20 @@ export type ScheduleBlock = {
   heating_needed: boolean;
 };
 
+export type ScheduleStep = {
+  label: string;
+  outdoor_t_c: number;
+  outdoor_rh_pct: number;
+  target_t_c: number;
+  fans_on: number;
+  air_speed_mps: number | null;
+  effective_temp_c: number | null;
+  vpd_kpa: number;
+};
+
 export type ScheduleResponse = {
   blocks: ScheduleBlock[];
+  series?: ScheduleStep[];
   peak_fans_on: number;
   fan_hours: number;
   heating_steps: number;

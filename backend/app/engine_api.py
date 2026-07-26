@@ -20,6 +20,7 @@ from pcis.core import heat_moisture_balance as hmb
 from pcis.core import house_metrics as hmet
 from pcis.core import mortality as mort
 from pcis.core import recommendation_engine as re
+from pcis.core import tunnel_geometry as tgeo
 from pcis.equipment.cooling_pad import COOLING_PAD_CATALOG
 from pcis.equipment.fan_curve import FAN_CATALOG
 
@@ -112,6 +113,9 @@ def _rec_dict(rec: re.Recommendation) -> dict:
         "target_airspeed_mps": rec.target_airspeed_mps,
         "effective_temp_c": round(rec.effective_temp_c, 1) if rec.effective_temp_c is not None else None,
         "vpd_kpa": round(rec.vpd_kpa, 2),
+        "achievable_indoor_t_c": round(rec.achievable_indoor_t_c, 1) if rec.achievable_indoor_t_c is not None else None,
+        "felt_comfort_index": round(rec.felt_comfort_index, 0) if rec.felt_comfort_index is not None else None,
+        "moisture_control_limited": rec.moisture_control_limited,
         "heating_needed": rec.heating_needed,
         "heat_deficit_kw": round(rec.heat_deficit_w / 1000.0, 1),
         "heater_duty_fraction": rec.heater_duty_fraction,
@@ -154,7 +158,14 @@ def recommend(payload) -> dict:
     out["body_weight_kg"] = round(weight, 3)
 
     # Derived house metrics: stocking density, estimated CO2, air changes.
-    flock = hmb.flock_load(payload.bird_count, weight, rec.comfort.target_temp_c)
+    # Evaluated at the ACHIEVABLE indoor temperature (what the house can
+    # actually hold), not the target -- bird moisture and CO2 output both
+    # depend on the real temperature, and using the target understated
+    # them on hot days.
+    flock = hmb.flock_load(
+        payload.bird_count, weight,
+        rec.achievable_indoor_t_c if rec.achievable_indoor_t_c is not None else rec.comfort.target_temp_c,
+    )
     metrics = hmet.assess(
         bird_count=payload.bird_count,
         body_weight_kg=weight,
@@ -163,6 +174,56 @@ def recommend(payload) -> dict:
         delivered_airflow_m3_per_h=rec.delivered_airflow_m3_per_h,
         co2_production_m3_per_h=flock.co2_m3_per_h,
     )
+    # Predicted indoor humidity from the moisture mass balance.
+    pred = hmet.predict_indoor_humidity(
+        indoor_t_c=rec.achievable_indoor_t_c,
+        supply_t_c=rec.supply_air_t_c,
+        supply_rh_pct=rec.supply_air_rh_pct,
+        moisture_load_kg_per_h=flock.moisture_kg_per_h,
+        airflow_m3_per_h=rec.delivered_airflow_m3_per_h or 0.0,
+    )
+    out["predicted_humidity"] = None if pred is None else {
+        "indoor_rh_pct": pred.indoor_rh_pct,
+        "indoor_humidity_ratio_g_per_kg": pred.indoor_humidity_ratio_g_per_kg,
+        "supply_humidity_ratio_g_per_kg": pred.supply_humidity_ratio_g_per_kg,
+        "moisture_added_g_per_kg": pred.moisture_added_g_per_kg,
+        "saturated": pred.saturated,
+        "note": pred.note,
+    }
+
+    # Tunnel geometry: what ceiling height would reach the velocity target?
+    xs = payload.width_m * payload.height_m
+    per_fan = FAN_CATALOG[payload.fan_index].airflow_at_static_pressure(payload.static_pressure_pa)
+    geo = tgeo.advise_geometry(
+        airflow_m3_per_h=rec.delivered_airflow_m3_per_h or 0.0,
+        house_width_m=payload.width_m,
+        current_cross_section_m2=xs,
+        airflow_per_fan_m3_per_h=per_fan,
+        installed_fans=payload.installed_fans,
+    )
+    heights = [payload.height_m, payload.height_m - 0.3, payload.height_m - 0.5,
+               payload.height_m - 0.8, payload.height_m - 1.0]
+    table = tgeo.velocity_table(rec.delivered_airflow_m3_per_h or 0.0, payload.width_m,
+                                [h for h in heights if h >= 1.2])
+    out["tunnel_geometry"] = {
+        "current_velocity_mps": geo.current_velocity_mps,
+        "target_velocity_mps": geo.target_velocity_mps,
+        "meets_target": geo.meets_target,
+        "required_cross_section_m2": geo.required_cross_section_m2,
+        "required_ceiling_height_m": geo.required_ceiling_height_m,
+        "current_ceiling_height_m": geo.current_ceiling_height_m,
+        "ceiling_drop_m": geo.ceiling_drop_m,
+        "fans_needed_instead": geo.fans_needed_instead,
+        "note": geo.note,
+        "options": [
+            {"ceiling_height_m": o.ceiling_height_m, "cross_section_m2": o.cross_section_m2,
+             "velocity_mps": o.velocity_mps, "velocity_fpm": o.velocity_fpm,
+             "meets_tunnel_target": o.meets_tunnel_target,
+             "windchill_effective": o.windchill_effective}
+            for o in table
+        ],
+    }
+
     out["house_metrics"] = {
         "stocking_density_kg_m2": metrics.stocking_density_kg_m2,
         "density_limit_kg_m2": metrics.density_limit_kg_m2,
@@ -244,8 +305,22 @@ def schedule(payload) -> dict:
         }
         for b in result.blocks
     ]
+    series = [
+        {
+            "label": s.label,
+            "outdoor_t_c": round(s.outdoor_t_c, 1),
+            "outdoor_rh_pct": round(s.outdoor_rh_pct, 0),
+            "target_t_c": round(s.target_indoor_t_c, 1),
+            "fans_on": s.fans_on,
+            "air_speed_mps": round(s.recommendation.air_speed_mps, 2) if s.recommendation.air_speed_mps is not None else None,
+            "effective_temp_c": round(s.recommendation.effective_temp_c, 1) if s.recommendation.effective_temp_c is not None else None,
+            "vpd_kpa": round(s.recommendation.vpd_kpa, 2),
+        }
+        for s in result.steps
+    ]
     return {
         "blocks": blocks,
+        "series": series,
         "peak_fans_on": result.peak_fans_on,
         "fan_hours": round(result.fan_hours(step_h), 1),
         "heating_steps": result.heating_steps,

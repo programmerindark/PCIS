@@ -229,20 +229,14 @@ def from_recommendation(rec) -> BirdStatus:
     to avoid a circular import with the engine.)
     """
     target = rec.comfort.target_temp_c
-    rh_pct = rec.comfort.rh_pct
-    weight = rec.comfort.body_weight_kg
-    realistic_t = max(target, rec.supply_air_t_c)
-
-    if realistic_t <= target + 1e-9:
-        comfort = rec.comfort  # house holds target; reuse as-is
-    else:
-        w = psy.humidity_ratio_from_relative_humidity(realistic_t, rh_pct)
-        twb = psy.wet_bulb_temperature(realistic_t, w)
-        comfort = ce.bird_comfort_index(realistic_t, twb, rh_pct, weight)
-
-    effective = None
-    if rec.air_speed_mps is not None:
-        effective = wc.effective_temperature_c(realistic_t, rec.air_speed_mps)
+    # The engine now evaluates comfort, THI and the felt temperature at
+    # the ACHIEVABLE indoor temperature (it cannot cool below the supply
+    # air), so those values can be used directly -- no recomputation.
+    realistic_t = rec.achievable_indoor_t_c
+    if realistic_t is None:  # older callers / defensive
+        realistic_t = max(target, rec.supply_air_t_c)
+    comfort = rec.comfort
+    effective = rec.effective_temp_c
 
     status = assess(comfort, realistic_t, effective)
     if realistic_t > target + 0.1:

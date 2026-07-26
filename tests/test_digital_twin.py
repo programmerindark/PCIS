@@ -246,12 +246,20 @@ def test_grow_out_governing_constraint_can_change_with_age():
     # The mechanism behind the dip above -- worth asserting explicitly
     # so that if the constraint handover ever silently disappears, a
     # test says so.
-    ages = [float(d) for d in range(7, 43, 7)]
+    #
+    # The real handover is at the START of the grow-out in cool weather:
+    # day-old chicks make almost no heat, so air-quality MINIMUM
+    # VENTILATION governs; once they grow, their sensible heat takes over.
+    # (It is evaluated in cool weather because in hot weather the
+    # sensible-heat load dominates at every age.)
+    ages = [1.0, 3.0, 7.0, 14.0, 28.0, 42.0]
     result = dt.simulate_grow_out(
-        age_days_sequence=ages, outdoor_t_c=30.0, outdoor_rh_pct=50.0, **COMMON
+        age_days_sequence=ages, outdoor_t_c=5.0, outdoor_rh_pct=50.0, **COMMON
     )
-    constraints = {s.recommendation.governing_constraint for s in result.steps}
-    assert len(constraints) > 1
+    constraints = [s.recommendation.governing_constraint for s in result.steps]
+    assert len(set(constraints)) > 1
+    assert constraints[0] == "minimum_ventilation"
+    assert constraints[-1] == "sensible_heat"
 
 
 def test_grow_out_target_temperature_falls_as_birds_grow():

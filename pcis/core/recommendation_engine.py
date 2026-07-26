@@ -63,6 +63,22 @@ from pcis.equipment.fan_curve import FanCurve
 #: a literature value.
 PAD_ACTIVATION_MARGIN_C = 1.0
 
+#: Minimum humidity-ratio difference (kg water / kg dry air) between the
+#: target indoor state and the incoming supply air for ventilation to be
+#: a PRACTICAL moisture-removal mechanism.
+#:
+#: The moisture mass balance is airflow = load / (W_indoor - W_supply),
+#: so as the supply air approaches the indoor absolute humidity the
+#: required airflow tends to infinity. Mathematically correct, but
+#: operationally meaningless: it produced a spike where a house needing
+#: 8 fans at 26 C appeared to need 20 fans at 20 C, purely because the
+#: incoming air happened to sit just below the target humidity ratio.
+#: Below this threshold PCIS reports that ventilation cannot control
+#: moisture at these conditions (the humidity analogue of
+#: TARGET_UNREACHABLE) instead of demanding unbounded airflow.
+#: 0.5 g/kg is PCIS engineering judgment, not a literature value.
+MOISTURE_MIN_HUMIDITY_RATIO_DIFF = 0.0005
+
 #: Explanation attached whenever the target indoor temperature cannot
 #: be reached by ventilation at the current supply-air state. Kept as a
 #: named constant so the GUI, PDF report, digital twin, and CLI all
@@ -179,6 +195,9 @@ class Recommendation:
     effective_temp_c: float | None = None
     target_airspeed_mps: float | None = None
     vpd_kpa: float = 0.0
+    achievable_indoor_t_c: float | None = None
+    moisture_control_limited: bool = False
+    felt_comfort_index: float | None = None
     heating_needed: bool = False
     heat_deficit_w: float = 0.0
     heater_duty_fraction: float | None = None
@@ -318,6 +337,11 @@ def recommend(
     # possibly be fed. If even that is at/above target, no fan count
     # reaches target and saying so is more useful than a number.
     target_unreachable = supply_t_c >= target_temp
+    # The coldest the house can actually be held: ventilation can never
+    # cool below the supply air it is fed. Every bird-facing readout
+    # (felt temperature, comfort, THI) is evaluated here, NOT at the
+    # requested target, so a hot day reports what the birds really get.
+    achievable_indoor_t_c = max(indoor_t_c, supply_t_c)
     if target_unreachable:
         explanation.append(
             f"{TARGET_UNREACHABLE_WARNING} (supply air {supply_t_c:.1f}C vs "
@@ -330,10 +354,26 @@ def recommend(
         requirements["sensible_heat"] = vs.required_airflow_for_sensible_heat(
             net.net_sensible_w, delta_t_c, supply_t_c, supply_rh_pct
         )
-    if indoor_rh_pct > supply_rh_pct or indoor_t_c != supply_t_c:
+    # Moisture: evaluated at the achievable indoor state (the exhaust air
+    # is at the temperature the house actually holds), and guarded against
+    # the near-singularity described at MOISTURE_MIN_HUMIDITY_RATIO_DIFF.
+    w_target = psy.humidity_ratio_from_relative_humidity(achievable_indoor_t_c, indoor_rh_pct)
+    w_supply = psy.humidity_ratio_from_relative_humidity(supply_t_c, supply_rh_pct)
+    moisture_control_limited = (w_target - w_supply) < MOISTURE_MIN_HUMIDITY_RATIO_DIFF
+    if moisture_control_limited:
+        explanation.append(
+            f"Moisture: incoming air ({w_supply * 1000:.1f} g/kg) is nearly as humid as "
+            f"the target indoor state ({w_target * 1000:.1f} g/kg), so ventilation cannot "
+            "practically remove moisture here -- each m3 of fresh air carries almost as "
+            "much water in as the air it replaces. The moisture constraint is therefore "
+            "NOT used to size fans at these conditions (it would demand unbounded "
+            "airflow); dehumidification or warmer supply air is the real lever."
+        )
+    else:
         try:
             requirements["moisture"] = vs.required_airflow_for_moisture(
-                net.moisture_kg_per_h, indoor_t_c, indoor_rh_pct, supply_t_c, supply_rh_pct
+                net.moisture_kg_per_h, achievable_indoor_t_c, indoor_rh_pct,
+                supply_t_c, supply_rh_pct,
             )
         except ValueError:
             pass  # supply air already more humid than indoor target; moisture doesn't govern
@@ -433,14 +473,20 @@ def recommend(
             "house design and obstructions."
         )
         # Wind-chill / effective temperature -- an estimate for the
-        # operator, NOT a driver of the fan decision. Uses the indoor
-        # dry-bulb temperature the recommendation is targeting.
-        effective_temp_c = wc.effective_temperature_c(indoor_t_c, air_speed_mps)
-        drop = indoor_t_c - effective_temp_c
+        # operator, NOT a driver of the fan decision.
+        #
+        # IMPORTANT: this is evaluated at the temperature the house can
+        # ACTUALLY hold (`achievable_indoor_t_c`), not at the requested
+        # target. Ventilation cannot cool below the air it is fed, so on
+        # a hot day the target is unreachable and reporting the felt
+        # temperature relative to it would understate what the birds
+        # experience by many degrees.
+        effective_temp_c = wc.effective_temperature_c(achievable_indoor_t_c, air_speed_mps)
+        drop = achievable_indoor_t_c - effective_temp_c
         if drop > 0.05:
             explanation.append(
                 f"Wind-chill estimate: at {air_speed_mps:.2f} m/s, fully-feathered "
-                f"birds feel about {effective_temp_c:.1f}C rather than the {indoor_t_c:.1f}C "
+                f"birds feel about {effective_temp_c:.1f}C rather than the {achievable_indoor_t_c:.1f}C "
                 f"dry-bulb ({drop:.1f}C cooler) [Aviagen Ross Environmental Management, "
                 "500 ft/min ~= 10F anchor]. This is an ESTIMATE, not a measurement -- "
                 "Aviagen states effective temperature can only be estimated, not "
@@ -451,7 +497,7 @@ def recommend(
         else:
             explanation.append(
                 f"Wind-chill estimate: negligible at {air_speed_mps:.2f} m/s and "
-                f"{indoor_t_c:.1f}C (the effect fades above ~32C and reverses above "
+                f"{achievable_indoor_t_c:.1f}C (the effect fades above ~32C and reverses above "
                 "~38C) [Aviagen]."
             )
         # Young-chick chill guard: the delivered velocity must stay below
@@ -465,15 +511,15 @@ def recommend(
             )
 
     # --- Comfort assessment ---------------------------------------------
-    w_indoor = psy.humidity_ratio_from_relative_humidity(indoor_t_c, indoor_rh_pct)
-    twb_indoor = psy.wet_bulb_temperature(indoor_t_c, w_indoor)
-    vpd_kpa = psy.vapor_pressure_deficit(indoor_t_c, indoor_rh_pct)
+    w_indoor = psy.humidity_ratio_from_relative_humidity(achievable_indoor_t_c, indoor_rh_pct)
+    twb_indoor = psy.wet_bulb_temperature(achievable_indoor_t_c, w_indoor)
+    vpd_kpa = psy.vapor_pressure_deficit(achievable_indoor_t_c, indoor_rh_pct)
     explanation.append(
-        f"Vapor-pressure deficit (VPD) at {indoor_t_c:.1f}C/{indoor_rh_pct:.0f}% RH = "
+        f"Vapor-pressure deficit (VPD) at {achievable_indoor_t_c:.1f}C/{indoor_rh_pct:.0f}% RH = "
         f"{vpd_kpa:.2f} kPa (air's drying power). Low VPD = humid = weak evaporative "
         "cooling, so lean on air velocity rather than pads [Cobb; VPD from psychrometrics.py]."
     )
-    comfort = ce.bird_comfort_index(indoor_t_c, twb_indoor, indoor_rh_pct, body_weight_kg)
+    comfort = ce.bird_comfort_index(achievable_indoor_t_c, twb_indoor, indoor_rh_pct, body_weight_kg)
     confidence -= CONFIDENCE_DEDUCTION_COMPOSITE_COMFORT_INDEX
     explanation.append(
         f"-{CONFIDENCE_DEDUCTION_COMPOSITE_COMFORT_INDEX:.0f} confidence: "
@@ -485,6 +531,19 @@ def recommend(
         f"deviation={comfort.deviation_c:+.1f}C, THI={comfort.thi:.1f} "
         f"({comfort.thi_class}), comfort_index={comfort.comfort_index:.0f}/100."
     )
+
+    # Comfort re-scored at the FELT temperature (what moving air actually
+    # buys the birds). Reported alongside the dry-bulb comfort index; it
+    # inherits the wind-chill ESTIMATE caveat, so it is a second opinion,
+    # not a replacement.
+    if effective_temp_c is not None:
+        w_felt = psy.humidity_ratio_from_relative_humidity(effective_temp_c, indoor_rh_pct)
+        twb_felt = psy.wet_bulb_temperature(effective_temp_c, w_felt)
+        felt_comfort_index = ce.bird_comfort_index(
+            effective_temp_c, twb_felt, indoor_rh_pct, body_weight_kg
+        ).comfort_index
+    else:
+        felt_comfort_index = comfort.comfort_index
 
     confidence = max(0.0, min(100.0, confidence))
 
@@ -508,6 +567,9 @@ def recommend(
             else None
         ),
         vpd_kpa=vpd_kpa,
+        achievable_indoor_t_c=achievable_indoor_t_c,
+        moisture_control_limited=moisture_control_limited,
+        felt_comfort_index=felt_comfort_index,
         heating_needed=heat_req.heating_needed,
         heat_deficit_w=heat_req.heat_deficit_w,
         heater_duty_fraction=heat_req.heater_duty_fraction,

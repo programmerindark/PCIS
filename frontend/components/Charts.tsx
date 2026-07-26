@@ -20,6 +20,31 @@ function line(pts: [number, number][]): string {
   return pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
 }
 
+/** Tiny inline sparkline for stat cards. */
+export function Sparkline({ values, color = "#38bdf8" }: { values: (number | null)[]; color?: string }) {
+  const pts = values.filter((v): v is number => v != null);
+  if (pts.length < 2) return <div style={{ height: 22 }} />;
+  const w = 120, h = 22;
+  const min = Math.min(...pts), max = Math.max(...pts);
+  const span = max - min || 1;
+  const step = w / (pts.length - 1);
+  const d = pts.map((v, i) => `${i ? "L" : "M"}${(i * step).toFixed(1)},${(h - 2 - ((v - min) / span) * (h - 5)).toFixed(1)}`).join(" ");
+  const area = `${d} L${w},${h} L0,${h} Z`;
+  const id = `sg-${color.replace(/[^a-z0-9]/gi, "")}`;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={22} preserveAspectRatio="none" style={{ display: "block", marginTop: 6 }}>
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${id})`} />
+      <path d={d} fill="none" stroke={color} strokeWidth="1.6" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
 /** Today's outdoor climate: temperature (left axis) + humidity (right axis). */
 export function ClimateTrend({ points }: { points: WxPoint[] }) {
   if (!points.length) return null;

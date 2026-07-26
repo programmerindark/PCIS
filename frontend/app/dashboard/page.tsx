@@ -13,7 +13,7 @@ import { recommend, schedule, advise, mortality, getGrowthCurve } from "@/lib/ap
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
 import AppShell from "@/components/AppShell";
 import Modal from "@/components/Modal";
-import { ClimateTrend, GrowthCurve } from "@/components/Charts";
+import { ClimateTrend, GrowthCurve, Sparkline } from "@/components/Charts";
 import type {
   Farm, House, Flock, RecommendResponse, ScheduleResponse, Alert, AdviseResponse, MortalityResponse,
 } from "@/lib/types";
@@ -218,6 +218,9 @@ export default function DashboardPage() {
 
   const bs = result?.bird_status;
   const hmx = result?.house_metrics;
+  const series = sched?.series ?? [];
+  const ph = result?.predicted_humidity ?? null;
+  const tg = result?.tunnel_geometry ?? null;
   const alerts = result && house ? deriveAlerts(result, house, sched) : [];
   if (hmx && !hmx.density_within_limit)
     alerts.push({ severity: "warning", title: "Stocking density over limit", message: hmx.note });
@@ -314,7 +317,7 @@ export default function DashboardPage() {
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "end", marginTop: 10 }}>
                   <div><label style={{ marginTop: 0 }}>Outdoor °C</label><input type="number" value={outT} onChange={(e) => { setOutT(+e.target.value); setWxSource("manual"); }} style={{ width: 110 }} /></div>
                   <div><label style={{ marginTop: 0 }}>Outdoor RH %</label><input type="number" value={outRh} onChange={(e) => { setOutRh(+e.target.value); setWxSource("manual"); }} style={{ width: 110 }} /></div>
-                  <div><label style={{ marginTop: 0 }}>Indoor RH %</label><input type="number" value={inRh} onChange={(e) => setInRh(+e.target.value)} style={{ width: 110 }} /></div>
+                  <div><label style={{ marginTop: 0 }}>Indoor RH % (measured)</label><input type="number" value={inRh} onChange={(e) => setInRh(+e.target.value)} style={{ width: 110 }} /></div>
                   <button className="primary" style={{ maxWidth: 130, margin: 0 }} onClick={compute} disabled={computing}>{computing ? "…" : "Update"}</button>
                   {farm?.latitude != null && <button className="ghost-btn" onClick={() => farm && refreshWeather(farm)}>↻ Weather</button>}
                 </div>
@@ -343,6 +346,35 @@ export default function DashboardPage() {
           <div className="dash-grid" style={{ marginTop: 16 }}>
             {/* ============ LEFT COLUMN ============ */}
             <div>
+            {/* metric cards */}
+            <div className="metrics">
+              <Metric icon="💚" label="Bird Comfort" color="var(--green)"
+                value={result?.felt_comfort_index != null ? `${result.felt_comfort_index}%` : (bs ? `${bs.comfort_score}%` : "—")}
+                sub={result?.felt_comfort_index != null
+                  ? `as felt · ${bs?.comfort_score ?? "—"}% dry-bulb`
+                  : (bs?.comfort_label ?? "")}
+                pct={result?.felt_comfort_index ?? bs?.comfort_score ?? 0} />
+              <Metric icon="🌡" label="Feel Temperature" color="var(--blue)"
+                value={result?.effective_temp_c != null ? `${result.effective_temp_c.toFixed(1)}°` : "—"}
+                sub={result && result.effective_temp_c != null && result.achievable_indoor_t_c != null
+                  ? `house ${result.achievable_indoor_t_c.toFixed(1)}° · target ${result.comfort.target_temp_c.toFixed(1)}°`
+                  : `Target ${result?.comfort.target_temp_c.toFixed(1) ?? "—"}°C`}
+                pct={result?.effective_temp_c != null ? Math.min(100, (result.effective_temp_c / 40) * 100) : 0}
+                spark={series.map((s) => s.effective_temp_c)} />
+              <Metric icon="🔥" label="Heat Stress" color={RISK_COLOR[bs?.heat_stress_risk ?? "Low"]}
+                value={bs?.heat_stress_risk ?? "—"} sub={`Panting ${bs?.panting_index ?? "—"}`}
+                pct={bs?.heat_stress_risk === "High" ? 100 : bs?.heat_stress_risk === "Moderate" ? 60 : 25} />
+              <Metric icon="🌀" label="Fans Running" color={result && result.fans_on > house.installed_fans ? "var(--red)" : "var(--teal)"}
+                value={result ? `${result.fans_on}/${house.installed_fans}` : "—"}
+                sub={`${result?.pads_on ? "Pads ON" : "Pads off"}${result?.heating_needed ? " · Heat ON" : ""}`}
+                pct={Math.min(100, ((result?.fans_on ?? 0) / Math.max(1, house.installed_fans)) * 100)}
+                spark={series.map((s) => s.fans_on)} />
+              <Metric icon="📉" label="Mortality" color={mortAssess && !mortAssess.within_target ? "var(--red)" : "var(--orange)"}
+                value={mortAssess ? `${mortAssess.cumulative_pct}%` : "—"}
+                sub={`Limit ${mortAssess?.acceptable_pct ?? "—"}% · ${mort.cumulative_dead.toLocaleString()} birds`}
+                pct={Math.min(100, ((mortAssess?.cumulative_pct ?? 0) / Math.max(0.1, mortAssess?.acceptable_pct ?? 1)) * 100)} />
+            </div>
+
           {/* ============ 3D — centre stage ============ */}
           <div className="hero3d">
             <div className="hero3d-head">
@@ -368,35 +400,40 @@ export default function DashboardPage() {
             />
           </div>
 
-            {/* metric cards */}
-            <div className="metrics">
-              <Metric icon="💚" label="Bird Comfort" color="var(--green)"
-                value={bs ? `${bs.comfort_score}%` : "—"} sub={bs?.comfort_label ?? ""}
-                pct={bs?.comfort_score ?? 0} />
-              <Metric icon="🌡" label="Feel Temperature" color="var(--blue)"
-                value={result?.effective_temp_c != null ? `${result.effective_temp_c.toFixed(1)}°` : "—"}
-                sub={`Target ${result?.comfort.target_temp_c.toFixed(1) ?? "—"}°C`}
-                pct={result?.effective_temp_c != null ? Math.min(100, (result.effective_temp_c / 40) * 100) : 0} />
-              <Metric icon="🔥" label="Heat Stress" color={RISK_COLOR[bs?.heat_stress_risk ?? "Low"]}
-                value={bs?.heat_stress_risk ?? "—"} sub={`Panting ${bs?.panting_index ?? "—"}`}
-                pct={bs?.heat_stress_risk === "High" ? 100 : bs?.heat_stress_risk === "Moderate" ? 60 : 25} />
-              <Metric icon="🌀" label="Fans Running" color={result && result.fans_on > house.installed_fans ? "var(--red)" : "var(--teal)"}
-                value={result ? `${result.fans_on}/${house.installed_fans}` : "—"}
-                sub={`${result?.pads_on ? "Pads ON" : "Pads off"}${result?.heating_needed ? " · Heat ON" : ""}`}
-                pct={Math.min(100, ((result?.fans_on ?? 0) / Math.max(1, house.installed_fans)) * 100)} />
-              <Metric icon="📉" label="Mortality" color={mortAssess && !mortAssess.within_target ? "var(--red)" : "var(--orange)"}
-                value={mortAssess ? `${mortAssess.cumulative_pct}%` : "—"}
-                sub={`Limit ${mortAssess?.acceptable_pct ?? "—"}% · ${mort.cumulative_dead.toLocaleString()} birds`}
-                pct={Math.min(100, ((mortAssess?.cumulative_pct ?? 0) / Math.max(0.1, mortAssess?.acceptable_pct ?? 1)) * 100)} />
-            </div>
-
             {/* stat strip */}
             <div className="stats">
-              <div className="stat"><div className="k">Target Temp</div><div className="v">{result?.comfort.target_temp_c.toFixed(1) ?? "—"}<span className="u"> °C</span></div></div>
-              <div className="stat"><div className="k">Indoor RH</div><div className="v">{inRh}<span className="u"> %</span></div></div>
-              <div className="stat"><div className="k">Air Speed</div><div className="v">{result?.air_speed_mps?.toFixed(2) ?? "—"}<span className="u"> m/s</span></div></div>
-              <div className="stat"><div className="k">Static Pressure</div><div className="v">{house.static_pressure_pa}<span className="u"> Pa</span></div></div>
-              <div className="stat"><div className="k">VPD</div><div className="v">{result?.vpd_kpa ?? "—"}<span className="u"> kPa</span></div></div>
+              <div className="stat">
+                <div className="k">Target Temp</div>
+                <div className="v">{result?.comfort.target_temp_c.toFixed(1) ?? "—"}<span className="u"> °C</span></div>
+                <Sparkline values={series.map((s) => s.target_t_c)} color="var(--orange)" />
+              </div>
+              <div className="stat">
+                <div className="k">Outdoor RH</div>
+                <div className="v">{outRh}<span className="u"> %</span></div>
+                <Sparkline values={series.map((s) => s.outdoor_rh_pct)} color="var(--teal)" />
+              </div>
+              <div className="stat">
+                <div className="k">Indoor RH</div>
+                <div className="v" style={{ color: ph && Math.abs(ph.indoor_rh_pct - inRh) > 10 ? "var(--warn)" : undefined }}>
+                  {inRh}<span className="u"> % meas.</span>
+                </div>
+                <div className="u" style={{ fontSize: 10.5 }}>predicted {ph ? `${ph.indoor_rh_pct}%` : "—"}</div>
+              </div>
+              <div className="stat">
+                <div className="k">Air Speed</div>
+                <div className="v">{result?.air_speed_mps?.toFixed(2) ?? "—"}<span className="u"> m/s</span></div>
+                <Sparkline values={series.map((s) => s.air_speed_mps)} color="var(--blue)" />
+              </div>
+              <div className="stat">
+                <div className="k">Fans</div>
+                <div className="v">{result?.fans_on ?? "—"}<span className="u"> running</span></div>
+                <Sparkline values={series.map((s) => s.fans_on)} color="var(--green-bright)" />
+              </div>
+              <div className="stat">
+                <div className="k">VPD</div>
+                <div className="v">{result?.vpd_kpa ?? "—"}<span className="u"> kPa</span></div>
+                <Sparkline values={series.map((s) => s.vpd_kpa)} color="var(--purple)" />
+              </div>
               <div className="stat">
                 <div className="k">Stocking density</div>
                 <div className="v" style={{ color: hmx && !hmx.density_within_limit ? "var(--red)" : undefined }}>
@@ -528,6 +565,70 @@ export default function DashboardPage() {
               })}
             </div>
 
+            {tg && (
+              <div className="tile">
+                <div className="tile-head">
+                  <span className="tile-title">Tunnel geometry</span>
+                  <span className={tg.meets_target ? "chip" : "chip warn"}>
+                    {tg.current_velocity_mps} m/s
+                  </span>
+                </div>
+                <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>{tg.note}</div>
+
+                {!tg.meets_target && tg.required_ceiling_height_m != null && (
+                  <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+                    <div style={{ flex: 1, background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 12, padding: 11 }}>
+                      <div className="cap" style={{ color: "var(--green-bright)" }}>Drop ceiling</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, marginTop: 4 }}>{tg.required_ceiling_height_m} m</div>
+                      <div className="muted" style={{ fontSize: 11 }}>from {tg.current_ceiling_height_m} m · uses current fans</div>
+                    </div>
+                    <div style={{ flex: 1, background: "rgba(251,146,60,0.10)", border: "1px solid rgba(251,146,60,0.3)", borderRadius: 12, padding: 11 }}>
+                      <div className="cap" style={{ color: "var(--orange)" }}>Or add fans</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, marginTop: 4 }}>{tg.fans_needed_instead}</div>
+                      <div className="muted" style={{ fontSize: 11 }}>vs {house.installed_fans} installed</div>
+                    </div>
+                  </div>
+                )}
+
+                <table style={{ width: "100%", marginTop: 12, fontSize: 12, borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ color: "var(--ink-muted)" }}>
+                      <th style={{ textAlign: "left", fontWeight: 500, paddingBottom: 5 }}>Ceiling</th>
+                      <th style={{ textAlign: "right", fontWeight: 500 }}>Velocity</th>
+                      <th style={{ textAlign: "right", fontWeight: 500 }}>ft/min</th>
+                      <th style={{ textAlign: "right", fontWeight: 500 }}>Target</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tg.options.map((o, i) => (
+                      <tr key={i} style={{ borderTop: "1px solid var(--line)" }}>
+                        <td style={{ padding: "5px 0" }}>{o.ceiling_height_m} m</td>
+                        <td style={{ textAlign: "right", fontWeight: 600 }}>{o.velocity_mps}</td>
+                        <td style={{ textAlign: "right", color: "var(--ink-muted)" }}>{o.velocity_fpm}</td>
+                        <td style={{ textAlign: "right", color: o.meets_tunnel_target ? "var(--green-bright)" : o.windchill_effective ? "var(--orange)" : "var(--ink-dim)" }}>
+                          {o.meets_tunnel_target ? "✓ 3.0" : o.windchill_effective ? "~2.5" : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {ph && (
+              <div className="tile">
+                <div className="tile-head">
+                  <span className="tile-title">Humidity check</span>
+                  {Math.abs(ph.indoor_rh_pct - inRh) > 10 && <span className="chip warn">gap {Math.abs(ph.indoor_rh_pct - inRh).toFixed(0)}%</span>}
+                </div>
+                <div style={{ display: "flex", gap: 18 }}>
+                  <div><div className="cap">Measured</div><div style={{ fontSize: 22, fontWeight: 700 }}>{inRh}%</div></div>
+                  <div><div className="cap">Predicted</div><div style={{ fontSize: 22, fontWeight: 700, color: "var(--blue)" }}>{ph.indoor_rh_pct}%</div></div>
+                </div>
+                <div className="muted" style={{ fontSize: 11.5, marginTop: 10, lineHeight: 1.5 }}>{ph.note}</div>
+              </div>
+            )}
+
             <div className="tile">
               <div className="tile-head"><span style={{ fontWeight: 700, fontSize: 14 }}>Quick Actions</span></div>
               <div className="qa-grid">
@@ -616,32 +717,29 @@ export default function DashboardPage() {
   );
 }
 
-function Metric({ icon, label, value, sub, pct, color }: {
+function Metric({ icon, label, value, sub, pct, color, spark }: {
   icon: string; label: string; value: string; sub: string; pct: number; color: string;
+  spark?: (number | null)[];
 }) {
   return (
     <div
       className="metric"
       style={{
-        ["--mcol" as any]: `color-mix(in srgb, ${color} 45%, transparent)`,
-        ["--mglow" as any]: `color-mix(in srgb, ${color} 26%, transparent)`,
+        ["--mtint" as any]: `color-mix(in srgb, ${color} 16%, transparent)`,
+        ["--mcol" as any]: `color-mix(in srgb, ${color} 28%, transparent)`,
       }}
     >
       <div className="metric-top">
-        <span
-          className="metric-icon"
-          style={{
-            background: `color-mix(in srgb, ${color} 20%, transparent)`,
-            boxShadow: `0 0 16px color-mix(in srgb, ${color} 45%, transparent)`,
-          }}
-        >{icon}</span>
+        <span className="metric-icon">{icon}</span>
         <span className="metric-label">{label}</span>
       </div>
       <div className="metric-val" style={{ color }}>{value}</div>
       <div className="metric-sub muted">{sub}</div>
-      <div className="bar">
-        <i style={{ width: `${Math.max(0, Math.min(100, pct))}%`, background: color, boxShadow: `0 0 14px ${color}, 0 0 28px ${color}` }} />
-      </div>
+      {spark && spark.length > 1 ? (
+        <Sparkline values={spark} color={color} />
+      ) : (
+        <div className="bar"><i style={{ width: `${Math.max(0, Math.min(100, pct))}%`, background: color }} /></div>
+      )}
     </div>
   );
 }

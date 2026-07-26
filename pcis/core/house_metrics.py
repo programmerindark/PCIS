@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pcis.core import psychrometrics as psy
+
 #: EU 2007/43/EC stocking-density limits, kg/m².
 DENSITY_LIMIT_DEFAULT = 33.0
 DENSITY_LIMIT_DEROGATION = 39.0
@@ -33,6 +35,93 @@ DENSITY_LIMIT_MAX = 42.0
 
 #: Common operating guideline ceiling for in-house CO2, ppm.
 CO2_GUIDELINE_PPM = 3000.0
+
+
+@dataclass(frozen=True)
+class PredictedHumidity:
+    """Steady-state indoor humidity predicted from the moisture balance.
+
+    indoor_rh_pct : float
+        Predicted indoor relative humidity, % (capped at 100).
+    indoor_humidity_ratio_g_per_kg : float
+        Predicted indoor absolute humidity, g water / kg dry air.
+    supply_humidity_ratio_g_per_kg : float
+        The incoming air's absolute humidity, for comparison.
+    moisture_added_g_per_kg : float
+        How much water the birds add to each kg of air passing through.
+    saturated : bool
+        True when the balance predicts condensation (>= 100% RH) -- the
+        house cannot hold this much moisture at this temperature.
+    """
+
+    indoor_rh_pct: float
+    indoor_humidity_ratio_g_per_kg: float
+    supply_humidity_ratio_g_per_kg: float
+    moisture_added_g_per_kg: float
+    saturated: bool
+    note: str
+
+
+def predict_indoor_humidity(
+    *,
+    indoor_t_c: float,
+    supply_t_c: float,
+    supply_rh_pct: float,
+    moisture_load_kg_per_h: float,
+    airflow_m3_per_h: float,
+) -> PredictedHumidity | None:
+    """Predict indoor RH from the steady-state moisture mass balance.
+
+        W_indoor = W_supply + moisture_load / dry-air mass flow
+
+    Every term already exists in PCIS: the moisture load is the CIGR
+    flock figure from `heat_moisture_balance.flock_load`, and the
+    psychrometric conversions are ASHRAE/Buck. This adds no new
+    engineering -- it re-arranges the same balance the ventilation solver
+    uses to SIZE fans, in order to REPORT the humidity that results.
+
+    Useful in two ways: it gives a humidity figure on farms with no
+    hygrometer, and where a measurement IS available it acts as a
+    cross-check -- a measured RH well above prediction points at wet
+    litter, leaking drinkers or air short-circuiting past the birds.
+
+    Returns None when airflow is zero (nothing to balance against).
+    """
+    if airflow_m3_per_h <= 0:
+        return None
+
+    w_supply = psy.humidity_ratio_from_relative_humidity(supply_t_c, supply_rh_pct)
+    # Dry-air mass flow: volumetric flow / specific volume of the supply air.
+    v_specific = psy.specific_volume(supply_t_c, w_supply)
+    m_dry_air_kg_per_h = airflow_m3_per_h / v_specific
+    added = moisture_load_kg_per_h / m_dry_air_kg_per_h
+    w_indoor = w_supply + added
+
+    rh = psy.relative_humidity_from_humidity_ratio(indoor_t_c, w_indoor)
+    saturated = rh >= 100.0
+    rh = min(rh, 100.0)
+
+    if saturated:
+        note = (
+            f"Moisture balance predicts saturation at {indoor_t_c:.1f}C — the birds add "
+            f"{added * 1000:.1f} g/kg and the air cannot hold it. Expect condensation and "
+            "wet litter; increase ventilation or house temperature."
+        )
+    else:
+        note = (
+            f"Predicted indoor {rh:.0f}% RH: incoming air at {w_supply * 1000:.1f} g/kg "
+            f"plus {added * 1000:.1f} g/kg added by the birds. A measured value much "
+            "higher than this suggests wet litter, drinker leaks or air bypassing the birds."
+        )
+
+    return PredictedHumidity(
+        indoor_rh_pct=round(rh, 0),
+        indoor_humidity_ratio_g_per_kg=round(w_indoor * 1000, 2),
+        supply_humidity_ratio_g_per_kg=round(w_supply * 1000, 2),
+        moisture_added_g_per_kg=round(added * 1000, 2),
+        saturated=saturated,
+        note=note,
+    )
 
 
 @dataclass(frozen=True)
