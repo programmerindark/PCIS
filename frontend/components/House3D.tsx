@@ -19,7 +19,7 @@ const RISK_TINT: Record<string, number> = {
   High: 0x3a1414,
 };
 const RISK_COLOR: Record<string, string> = { Low: "#4ade80", Moderate: "#fbbf24", High: "#f87171" };
-const H_UNITS = 340;
+const H_UNITS = 280;
 
 export default function House3D(props: House3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -36,22 +36,50 @@ export default function House3D(props: House3DProps) {
     let width = mount.clientWidth || 640;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a1019);
-    scene.fog = new THREE.Fog(0x0a1019, 22, 40);
+    // transparent so the page's ambient glare shows through
+    scene.fog = new THREE.Fog(0x0a1019, 24, 44);
 
     const camera = new THREE.PerspectiveCamera(40, width / H_UNITS, 0.1, 200);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, H_UNITS);
     mount.appendChild(renderer.domElement);
 
-    scene.add(new THREE.HemisphereLight(0xbcd6ff, 0x0a1019, 1.1));
-    const key = new THREE.DirectionalLight(0xffffff, 0.9);
+    scene.add(new THREE.HemisphereLight(0xd6e8ff, 0x0a1019, 1.5));
+    const key = new THREE.DirectionalLight(0xffffff, 1.25);
     key.position.set(-6, 12, 9);
     scene.add(key);
-    const fill = new THREE.PointLight(0x2dd4bf, 0.5, 40);
-    fill.position.set(2, 3, 4);
+    const fill = new THREE.PointLight(0x4fe3f5, 1.5, 46);
+    fill.position.set(2, 3.4, 5);
     scene.add(fill);
+    const rim = new THREE.PointLight(0xd071ff, 1.1, 44);
+    rim.position.set(-8, 5, -5);
+    scene.add(rim);
+
+    // --- glare sprites (soft light bloom) ------------------------------
+    const glareTex = (() => {
+      const c = document.createElement("canvas");
+      c.width = c.height = 128;
+      const g = c.getContext("2d")!;
+      const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+      grd.addColorStop(0, "rgba(255,255,255,0.9)");
+      grd.addColorStop(0.35, "rgba(150,220,255,0.35)");
+      grd.addColorStop(1, "rgba(255,255,255,0)");
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 128, 128);
+      return new THREE.CanvasTexture(c);
+    })();
+    const addGlare = (x: number, y: number, z: number, scale: number, color: number) => {
+      const s = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: glareTex, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false })
+      );
+      s.position.set(x, y, z);
+      s.scale.set(scale, scale, 1);
+      scene.add(s);
+      return s;
+    };
+    const glareA = addGlare(-3, 4.2, 3, 7, 0x8fd8ff);
+    const glareB = addGlare(5, 3.2, -2, 5.5, 0xd071ff);
 
     const L = 13, W = 4.2, H = 2.6;
 
@@ -158,7 +186,9 @@ export default function House3D(props: House3DProps) {
 
     // --- airflow arrows (pad -> fans, i.e. toward -X) ------------------
     const arrows: THREE.Mesh[] = [];
-    const arrowMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0e4d66, transparent: true, opacity: 0.9 });
+    const arrowMat = new THREE.MeshStandardMaterial({
+      color: 0x7fe6ff, emissive: 0x2ba8d8, emissiveIntensity: 1.6, transparent: true, opacity: 0.95,
+    });
     for (let i = 0; i < 7; i++) {
       const cone = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.5, 8), arrowMat);
       cone.rotation.z = Math.PI / 2; // point -X
@@ -215,6 +245,11 @@ export default function House3D(props: House3DProps) {
       (floor.material as THREE.MeshStandardMaterial).color.lerpColors(
         new THREE.Color(0x0f2233), new THREE.Color(RISK_TINT[p.risk] ?? 0x0f2233), 0.5
       );
+
+      // breathing glare
+      const b = 1 + Math.sin(t * 0.8) * 0.12;
+      glareA.scale.set(7 * b, 7 * b, 1);
+      glareB.scale.set(5.5 * (2 - b), 5.5 * (2 - b), 1);
 
       place(fanLbl.current, fanAnchor);
       place(padLbl.current, padAnchor);

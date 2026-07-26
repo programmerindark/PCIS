@@ -17,6 +17,7 @@ from pcis.core import digital_twin as twin
 from pcis.core import envelope_presets as ep
 from pcis.core import growth_curve as gc
 from pcis.core import heat_moisture_balance as hmb
+from pcis.core import house_metrics as hmet
 from pcis.core import mortality as mort
 from pcis.core import recommendation_engine as re
 from pcis.equipment.cooling_pad import COOLING_PAD_CATALOG
@@ -151,6 +152,28 @@ def recommend(payload) -> dict:
     rec, weight = _recommend_obj(payload)
     out = _rec_dict(rec)
     out["body_weight_kg"] = round(weight, 3)
+
+    # Derived house metrics: stocking density, estimated CO2, air changes.
+    flock = hmb.flock_load(payload.bird_count, weight, rec.comfort.target_temp_c)
+    metrics = hmet.assess(
+        bird_count=payload.bird_count,
+        body_weight_kg=weight,
+        floor_area_m2=payload.length_m * payload.width_m,
+        house_volume_m3=payload.length_m * payload.width_m * payload.height_m,
+        delivered_airflow_m3_per_h=rec.delivered_airflow_m3_per_h,
+        co2_production_m3_per_h=flock.co2_m3_per_h,
+    )
+    out["house_metrics"] = {
+        "stocking_density_kg_m2": metrics.stocking_density_kg_m2,
+        "density_limit_kg_m2": metrics.density_limit_kg_m2,
+        "density_pct_of_limit": metrics.density_pct_of_limit,
+        "density_within_limit": metrics.density_within_limit,
+        "estimated_co2_ppm": metrics.estimated_co2_ppm,
+        "co2_within_guideline": metrics.co2_within_guideline,
+        "air_changes_per_hour": metrics.air_changes_per_hour,
+        "airflow_per_bird_m3_h": metrics.airflow_per_bird_m3_h,
+        "note": metrics.note,
+    }
     return out
 
 

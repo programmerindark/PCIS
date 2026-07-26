@@ -100,7 +100,10 @@ export default function HousesPage() {
   if (loading) return <div className="auth-wrap"><div className="muted">Loading…</div></div>;
 
   return (
-    <AppShell email={email} title="Houses">
+    <AppShell
+      email={email}
+      selectors={<div className="selector"><span className="ico">🏢</span><span style={{ fontWeight: 600 }}>{farm?.name} · Houses</span></div>}
+    >
       <div className="page-inner">
         <p className="muted" style={{ marginTop: 0 }}>Add or edit each broiler house; the dashboard reads them to advise you.</p>
 

@@ -52,7 +52,20 @@ export type Comfort = {
   comfort_index: number;
 };
 
+export type HouseMetrics = {
+  stocking_density_kg_m2: number;
+  density_limit_kg_m2: number;
+  density_pct_of_limit: number;
+  density_within_limit: boolean;
+  estimated_co2_ppm: number | null;
+  co2_within_guideline: boolean;
+  air_changes_per_hour: number | null;
+  airflow_per_bird_m3_h: number | null;
+  note: string;
+};
+
 export type RecommendResponse = {
+  house_metrics?: HouseMetrics;
   fans_on: number;
   pads_on: boolean;
   governing_constraint: string;
