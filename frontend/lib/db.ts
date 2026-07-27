@@ -239,3 +239,37 @@ export async function saveRecommendation(
     // History logging is non-critical; ignore failures.
   }
 }
+
+export type SensorHistoryPoint = {
+  observed_at: string;
+  indoor_t_c: number | null;
+  indoor_rh_pct: number | null;
+  outdoor_t_c: number | null;
+  outdoor_rh_pct: number | null;
+  pressure_hpa: number | null;
+  measured_air_speed_mps: number | null;
+};
+
+/** Logged sensor readings for a house, most recent last.
+ *
+ * These come only from /api/cron/log-sensor (source = 'sensor'), so this
+ * is real measured history, distinct from the one-off "Test read" the
+ * sensor card also supports. Empty until the cron has run at least once
+ * with valid Ecowitt keys on the farm — that's expected on a fresh farm,
+ * not an error.
+ */
+export async function getSensorHistory(
+  houseId: string,
+  hours = 48
+): Promise<SensorHistoryPoint[]> {
+  const since = new Date(Date.now() - hours * 3_600_000).toISOString();
+  const { data, error } = await supabase
+    .from("readings")
+    .select("observed_at, indoor_t_c, indoor_rh_pct, outdoor_t_c, outdoor_rh_pct, pressure_hpa, measured_air_speed_mps")
+    .eq("house_id", houseId)
+    .eq("source", "sensor")
+    .gte("observed_at", since)
+    .order("observed_at", { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as SensorHistoryPoint[];
+}

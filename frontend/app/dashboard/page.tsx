@@ -8,6 +8,7 @@ import { supabase } from "@/lib/supabaseClient";
 import {
   getMyFarm, getHouses, getActiveFlock, createFlock, updateFlock, endFlock, birdAgeDays,
   updateFarmLocation, updateFarmSensor, saveRecommendation, getMortalitySummary, logMortality, setLiveCount, type MortalitySummary,
+  getSensorHistory, type SensorHistoryPoint,
 } from "@/lib/db";
 import { recommend, schedule, advise, mortality, getGrowthCurve, readEcowittCloud, listEcowittDevices, type EcowittReading, type EcowittDevice } from "@/lib/api";
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
@@ -112,8 +113,9 @@ export default function DashboardPage() {
   const [mortAssess, setMortAssess] = useState<MortalityResponse | null>(null);
   const [deaths, setDeaths] = useState(0);
   const [growth, setGrowth] = useState<{ day: number; weight_kg: number }[]>([]);
+  const [sensorHistory, setSensorHistory] = useState<SensorHistoryPoint[]>([]);
   const [showConditions, setShowConditions] = useState(false);
-  const [modal, setModal] = useState<null | "climate" | "growth" | "plan">(null);
+  const [modal, setModal] = useState<null | "climate" | "growth" | "plan" | "sensorHistory">(null);
 
   const [showLocation, setShowLocation] = useState(false);
   const [showSensor, setShowSensor] = useState(false);
@@ -186,6 +188,14 @@ export default function DashboardPage() {
   }, [flock]);
 
   useEffect(() => { getGrowthCurve().then((r) => setGrowth(r.points)).catch(() => setGrowth([])); }, []);
+
+  // Logged sensor history (from /api/cron/log-sensor, not the one-off
+  // "Test read"). Empty on a fresh farm until the cron has run at least
+  // once — that's expected, not a bug.
+  useEffect(() => {
+    if (!house) { setSensorHistory([]); return; }
+    getSensorHistory(house.id, 48).then(setSensorHistory).catch(() => setSensorHistory([]));
+  }, [house]);
 
   const compute = useCallback(async () => {
     if (!house || !flock) return;
@@ -677,6 +687,23 @@ export default function DashboardPage() {
                   <ClimateTrend points={profile} />
                 </div>
               ) : null}
+              {sensorHistory.length >= 2 && (
+                <div className="tile expandable" onClick={() => setModal("sensorHistory")}>
+                  <div className="tile-head">
+                    <span className="tile-title">📡 Measured House History</span>
+                    <span className="expand-hint">Last 48h · sensor · tap to expand ⤢</span>
+                  </div>
+                  <ClimateTrend
+                    points={sensorHistory
+                      .filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null)
+                      .map((p) => ({
+                        t_c: p.indoor_t_c as number,
+                        rh_pct: p.indoor_rh_pct as number,
+                        label: new Date(p.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                      }))}
+                  />
+                </div>
+              )}
               {growth.length > 0 && (
                 <div className="tile expandable" onClick={() => setModal("growth")}>
                   <div className="tile-head"><span className="tile-title">Bird Weight Progress</span><span className="chip">Day {age}</span></div>
@@ -922,6 +949,37 @@ export default function DashboardPage() {
           </div>
         </Modal>
       )}
+
+      {modal === "sensorHistory" && sensorHistory.length >= 2 && (() => {
+        const pts = sensorHistory
+          .filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null)
+          .map((p) => ({
+            t_c: p.indoor_t_c as number,
+            rh_pct: p.indoor_rh_pct as number,
+            label: new Date(p.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          }));
+        const pressures = sensorHistory.map((p) => p.pressure_hpa).filter((v): v is number => v != null);
+        const speeds = sensorHistory.map((p) => p.measured_air_speed_mps).filter((v): v is number => v != null);
+        return (
+          <Modal title="Measured House History" subtitle="Actual sensor readings inside the house — logged automatically every 10 minutes, not estimates" onClose={() => setModal(null)}>
+            <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 16, padding: 16 }}>
+              <ClimateTrend points={pts} />
+            </div>
+            <div className="stats" style={{ marginTop: 16 }}>
+              <div className="stat"><div className="k">Peak temp</div><div className="v">{Math.max(...pts.map((p) => p.t_c)).toFixed(1)}<span className="u"> °C</span></div></div>
+              <div className="stat"><div className="k">Low temp</div><div className="v">{Math.min(...pts.map((p) => p.t_c)).toFixed(1)}<span className="u"> °C</span></div></div>
+              <div className="stat"><div className="k">Peak RH</div><div className="v">{Math.max(...pts.map((p) => p.rh_pct))}<span className="u"> %</span></div></div>
+              {pressures.length > 0 && (
+                <div className="stat"><div className="k">Pressure</div><div className="v">{pressures[pressures.length - 1]}<span className="u"> hPa</span></div></div>
+              )}
+              {speeds.length > 0 && (
+                <div className="stat"><div className="k">Air speed (latest)</div><div className="v">{speeds[speeds.length - 1]}<span className="u"> m/s</span></div></div>
+              )}
+              <div className="stat"><div className="k">Readings</div><div className="v">{sensorHistory.length}<span className="u"> · ~10 min apart</span></div></div>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {modal === "growth" && growth.length > 0 && (
         <Modal title="Bird Weight Progress" subtitle="Aviagen Ross 308 as-hatched target curve, days 0–56" onClose={() => setModal(null)}>

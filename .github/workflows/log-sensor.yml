@@ -1,0 +1,76 @@
+# Poll the Ecowitt gateway and log a reading.
+#
+# Why this exists rather than just using Vercel Cron:
+# Vercel's Hobby (free) plan enforces a MINIMUM INTERVAL OF ONCE PER DAY,
+# and a more frequent cron expression fails at deploy time rather than
+# degrading quietly. One reading a day is far too coarse to see a house
+# heat up through an afternoon, which is the whole point of logging.
+#
+# GitHub Actions gives 5-minute-minimum scheduling for free, and the repo
+# already lives here, so this drives the same endpoint Vercel Cron would.
+# Both can coexist: vercel.json keeps a daily job as a backstop.
+#
+# Setup (one time) — repo Settings -> Secrets and variables -> Actions:
+#   PCIS_APP_URL   e.g. https://pcis.vercel.app   (no trailing slash)
+#   CRON_SECRET    the same value set in Vercel's env vars
+#
+# Caveats worth knowing:
+#   * GitHub does not guarantee punctual scheduling; under load a run can
+#     be delayed by several minutes or skipped. For climate logging that
+#     is acceptable — a reading a few minutes late is still a reading.
+#   * Scheduled workflows are disabled automatically after 60 days with
+#     no repository activity. A single commit re-enables them.
+
+name: Log sensor reading
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub's minimum is 5.
+    - cron: "*/10 * * * *"
+  # Lets you trigger a run by hand from the Actions tab to test setup.
+  workflow_dispatch:
+
+# Prevent overlapping runs if one poll is slow.
+concurrency:
+  group: log-sensor
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call the PCIS sensor-logging endpoint
+        env:
+          APP_URL: ${{ secrets.PCIS_APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::error::PCIS_APP_URL and CRON_SECRET must both be set as repository secrets."
+            exit 1
+          fi
+
+          # --fail-with-body so a non-2xx status fails the step but still
+          # prints what the server said, which is what you need to debug.
+          http_code=$(curl --silent --show-error \
+            --max-time 60 \
+            --write-out "%{http_code}" \
+            --output /tmp/response.json \
+            --header "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/cron/log-sensor")
+
+          echo "HTTP $http_code"
+          cat /tmp/response.json
+          echo
+
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Sensor logging failed with HTTP $http_code"
+            exit 1
+          fi
+
+          # The route returns 200 with per-farm results, so a failed farm
+          # does not fail the HTTP call. Surface it as a warning instead of
+          # letting a silently-broken gateway look healthy for weeks.
+          if grep -q '"ok":true' /tmp/response.json && ! grep -q 'logged' /tmp/response.json; then
+            echo "::warning::Endpoint responded OK but logged no readings — check Ecowitt keys on the farm record."
+          fi
