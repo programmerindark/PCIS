@@ -5,9 +5,13 @@ import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { useUnits } from "@/lib/units";
 
+// The app's only navigation. Icons rather than words because the sidebar
+// is narrow; `label` is the hover tooltip and the accessible name.
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: "⌂" },
   { href: "/houses", label: "Houses", icon: "▤" },
+  { href: "/history", label: "Log — minute-by-minute readings", icon: "≡" },
+  { href: "/validation", label: "Validation — predicted vs measured", icon: "◎" },
 ];
 
 export default function AppShell({
