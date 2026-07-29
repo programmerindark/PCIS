@@ -314,3 +314,16 @@ button.primary:disabled { opacity: 0.45; cursor: default; transform: none; box-s
   .page { padding: 14px; }
   .hero-title { font-size: 23px; }
 }
+
+/* Live indicator pulse. Motion is the point: a static green dot reads as
+   decoration, whereas a pulse says "something is still happening". Held to
+   an opacity fade rather than a size change so it does not draw the eye
+   away from an actual alert. */
+@keyframes pcis-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot-lg { animation: none !important; }
+}

@@ -19,12 +19,29 @@ export default function AppShell({
   selectors,
   weather,
   alertCount = 0,
+  live = null,
   children,
 }: {
   email: string | null;
   selectors?: React.ReactNode;
-  weather?: { t: number; rh: number } | null;
+  /** Outdoor conditions for the top bar.
+   *
+   * `source` matters as much as the numbers. Once a two-module sensor is
+   * installed these figures may be MEASURED at the farm rather than pulled
+   * from a forecast for the nearest grid square, and the two can disagree
+   * by several degrees. Showing a temperature without saying where it came
+   * from invites the reader to trust a forecast as though someone had gone
+   * outside and looked. */
+  weather?: {
+    t: number;
+    rh: number;
+    source: "sensor" | "forecast" | "manual";
+    /** Minutes since the reading; drives the live indicator. */
+    ageMin?: number | null;
+  } | null;
   alertCount?: number;
+  /** true = data arriving, false = gone quiet, null = no sensor set up. */
+  live?: boolean | null;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -58,7 +75,24 @@ export default function AppShell({
         </nav>
 
         <div className="side-foot">
-          <div className="status-dot-lg" title="Engine online">✓</div>
+          {/* Reflects whether DATA IS ARRIVING, not merely that the page
+              loaded. The previous always-green tick claimed "engine online"
+              even when the sensor had been silent for hours, which is the
+              one moment a status light must not be reassuring. */}
+          <div
+            className="status-dot-lg"
+            title={
+              live == null ? "No sensor configured"
+                : live ? "Live — updating every minute"
+                : "Not updating — sensor has gone quiet"
+            }
+            style={{
+              color: live == null ? "var(--ink-muted)" : live ? "var(--ok)" : "var(--danger)",
+              animation: live ? "pcis-pulse 2s ease-in-out infinite" : undefined,
+            }}
+          >
+            {live == null ? "○" : live ? "●" : "⚠"}
+          </div>
         </div>
       </aside>
 
@@ -70,10 +104,22 @@ export default function AppShell({
             {weather && (
               <>
                 <div className="wx">
-                  <span style={{ fontSize: 19 }}>⛅</span>
+                  <span style={{ fontSize: 19 }}>
+                    {weather.source === "sensor" ? "📡" : weather.source === "manual" ? "✎" : "⛅"}
+                  </span>
                   <div>
                     <div className="t">{weather.t}°C</div>
-                    <div className="muted" style={{ fontSize: 10.5 }}>Humidity {weather.rh}%</div>
+                    <div className="muted" style={{ fontSize: 10.5 }}>
+                      Humidity {weather.rh}% ·{" "}
+                      <span style={{
+                        color: weather.source === "sensor" ? "var(--ok)" : "var(--ink-muted)",
+                        fontWeight: weather.source === "sensor" ? 700 : 400,
+                      }}>
+                        {weather.source === "sensor" ? "measured outside"
+                          : weather.source === "manual" ? "entered by hand"
+                          : "forecast"}
+                      </span>
+                    </div>
                   </div>
                 </div>
                 <div className="divider-v" />

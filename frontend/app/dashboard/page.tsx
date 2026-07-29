@@ -131,7 +131,7 @@ export default function DashboardPage() {
   const [outT, setOutT] = useState(32);
   const [outRh, setOutRh] = useState(60);
   const [inRh, setInRh] = useState(60);
-  const [wxSource, setWxSource] = useState<"weather" | "manual">("manual");
+  const [wxSource, setWxSource] = useState<"sensor" | "forecast" | "manual">("manual");
   const [profile, setProfile] = useState<WxPoint[] | null>(null);
 
   const [result, setResult] = useState<RecommendResponse | null>(null);
@@ -152,6 +152,12 @@ export default function DashboardPage() {
   const [growth, setGrowth] = useState<{ day: number; weight_kg: number }[]>([]);
   const [sensorHistory, setSensorHistory] = useState<SensorHistoryPoint[]>([]);
   const [sensorAgeMin, setSensorAgeMin] = useState<number | null>(null);
+  // Incremented once a minute to drive a live re-read + recompute. Without
+  // it the dashboard showed whatever was true when the page loaded: a
+  // screen left open on the wall would still be reporting the morning's
+  // conditions at dusk, while the staleness badge — which reads the
+  // background log, not the screen — cheerfully said "just now".
+  const [autoTick, setAutoTick] = useState(0);
   const [showConditions, setShowConditions] = useState(false);
   const [modal, setModal] = useState<null | "climate" | "growth" | "plan" | "sensorHistory">(null);
 
@@ -178,7 +184,7 @@ export default function DashboardPage() {
     if (f.latitude == null || f.longitude == null) return;
     try {
       const wx = await getCurrentWeather(f.latitude, f.longitude);
-      setOutT(wx.t_c); setOutRh(wx.rh_pct); setWxSource("weather");
+      setOutT(wx.t_c); setOutRh(wx.rh_pct); setWxSource("forecast");
       setProfile(await getTodayProfile(f.latitude, f.longitude));
     } catch { /* keep manual */ }
   }, []);
@@ -216,6 +222,7 @@ export default function DashboardPage() {
           if (r.ok && r.outdoor_measured) {
             if (r.outdoor_t_c != null) setOutT(r.outdoor_t_c);
             if (r.outdoor_rh_pct != null) setOutRh(r.outdoor_rh_pct);
+            setWxSource("sensor");
           }
         }).catch(() => {});
       }
@@ -279,7 +286,37 @@ export default function DashboardPage() {
     } finally { setComputing(false); }
   }, [house, flock, inRh, outT, outRh, profile, mort, sensor]);
 
-  useEffect(() => { if (house && flock) compute(); /* eslint-disable-next-line */ }, [house, flock, profile, mort]);
+  useEffect(() => { if (house && flock) compute(); /* eslint-disable-next-line */ }, [house, flock, profile, mort, autoTick]);
+
+  // Live refresh, matching the once-a-minute poll rate.
+  //
+  // The background cron already logs a reading and a recommendation every
+  // minute, but that is a database record — it is not what the screen
+  // shows. The dashboard used to read the sensor once on mount and then
+  // hold that snapshot indefinitely, so the fan count your dad reads at
+  // 4pm could have been computed at 9am. Re-reading here means the number
+  // on screen is the number for right now.
+  useEffect(() => {
+    if (!farm?.ecowitt_application_key || !ecoKeys.mac) return;
+    const timer = setInterval(async () => {
+      try {
+        const r = await readEcowittCloud(ecoKeys);
+        setSensor(r);
+        if (r.ok && r.indoor_rh_pct != null) setInRh(r.indoor_rh_pct);
+        if (r.ok && r.outdoor_measured) {
+          if (r.outdoor_t_c != null) setOutT(r.outdoor_t_c);
+          if (r.outdoor_rh_pct != null) setOutRh(r.outdoor_rh_pct);
+          setWxSource("sensor");
+        }
+      } catch {
+        // A failed read must not stop the loop — the next minute may work,
+        // and the staleness badge already reports the gap.
+      }
+      // Advance last, so the recompute above runs against the new state.
+      setAutoTick((t) => t + 1);
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [farm, ecoKeys]);
 
   async function addFlock(e: React.FormEvent) {
     e.preventDefault();
@@ -422,8 +459,9 @@ export default function DashboardPage() {
     <AppShell
       email={email}
       selectors={selectors}
-      weather={wxSource === "weather" ? { t: outT, rh: outRh } : null}
+      weather={{ t: outT, rh: outRh, source: wxSource, ageMin: sensorAgeMin }}
       alertCount={alerts.length}
+      live={sensorAgeMin == null ? null : sensorAgeMin < SENSOR_STALE_MIN}
     >
       {houses.length === 0 && (
         <div className="placeholder">No houses yet. <Link href="/houses" style={{ color: "var(--accent)" }}>Add your first house</Link>.</div>
@@ -585,7 +623,12 @@ export default function DashboardPage() {
 
             {showConditions && (
               <div className="tile" style={{ marginTop: 14 }}>
-                <div className="cap">Conditions {wxSource === "weather" ? "· auto from weather" : "· manual"}</div>
+                <div className="cap">
+                  Conditions ·{" "}
+                  {wxSource === "sensor" ? "measured at the farm"
+                    : wxSource === "forecast" ? "auto from forecast"
+                    : "manual"}
+                </div>
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "end", marginTop: 10 }}>
                   <div><label style={{ marginTop: 0 }}>Outdoor °C</label><input type="number" value={outT} onChange={(e) => { setOutT(+e.target.value); setWxSource("manual"); }} style={{ width: 110 }} /></div>
                   <div><label style={{ marginTop: 0 }}>Outdoor RH %</label><input type="number" value={outRh} onChange={(e) => { setOutRh(+e.target.value); setWxSource("manual"); }} style={{ width: 110 }} /></div>
