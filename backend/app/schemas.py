@@ -56,6 +56,10 @@ class MortalityRequest(BaseModel):
     cumulative_dead: int = Field(ge=0)
     age_days: float = Field(ge=0, le=56)
     dead_today: int = Field(ge=0, default=0)
+    #: Birds removed ALIVE (thinning / lifting / partial depletion).
+    #: Never mortality -- see pcis/core/mortality.py for why conflating
+    #: the two produces a false welfare alarm.
+    depleted: int = Field(ge=0, default=0)
 
 
 class EcowittCloudRequest(BaseModel):

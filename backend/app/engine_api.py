@@ -303,7 +303,10 @@ def recommend(payload) -> dict:
 
 def mortality(payload) -> dict:
     """Assess a flock's mortality against the cited EU benchmark."""
-    a = mort.assess(payload.placed, payload.cumulative_dead, payload.age_days, payload.dead_today)
+    a = mort.assess(
+        payload.placed, payload.cumulative_dead, payload.age_days,
+        payload.dead_today, depleted=getattr(payload, "depleted", 0),
+    )
     return {
         "live_count": a.live_count,
         "cumulative_dead": a.cumulative_dead,
@@ -312,6 +315,7 @@ def mortality(payload) -> dict:
         "within_target": a.within_target,
         "elevated_today": a.elevated_today,
         "daily_pct": a.daily_pct,
+        "depleted": a.depleted,
         "note": a.note,
     }
 

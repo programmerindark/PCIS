@@ -126,7 +126,12 @@ export async function endFlock(flockId: string): Promise<void> {
   if (error) throw error;
 }
 
-export type MortalitySummary = { cumulative_dead: number; today_dead: number };
+export type MortalitySummary = {
+  cumulative_dead: number;
+  today_dead: number;
+  /** Birds removed ALIVE (lifting / thinning). Never mortality. */
+  cumulative_depleted: number;
+};
 
 export async function getMortalitySummary(flockId: string): Promise<MortalitySummary> {
   const { data, error } = await supabase
@@ -141,7 +146,37 @@ export async function getMortalitySummary(flockId: string): Promise<MortalitySum
     cumulative_dead += r.dead;
     if (r.recorded_on === today) today_dead += r.dead;
   }
-  return { cumulative_dead, today_dead };
+  const { data: dep, error: depErr } = await supabase
+    .from("depletions")
+    .select("birds")
+    .eq("flock_id", flockId);
+  // A missing depletions table (migration not yet run) must not break the
+  // dashboard — treat it as "nothing lifted yet" rather than failing hard.
+  const cumulative_depleted = depErr
+    ? 0
+    : ((dep ?? []) as { birds: number }[]).reduce((a, r) => a + r.birds, 0);
+
+  return { cumulative_dead, today_dead, cumulative_depleted };
+}
+
+/** Record birds caught and sent to slaughter — a lift / thin.
+ *
+ * Deliberately a separate call from logMortality(). These birds leave the
+ * house, so ventilation must size for the smaller flock, but they are
+ * alive and must never reach the mortality figure: a thin is 20-40% of
+ * the flock against an EU ceiling of ~3%, so mixing them up reports a
+ * catastrophic welfare breach on a routine harvest day.
+ */
+export async function logDepletion(
+  flockId: string,
+  birds: number,
+  note?: string
+): Promise<void> {
+  if (birds <= 0) return;
+  const { error } = await supabase
+    .from("depletions")
+    .insert({ flock_id: flockId, birds: Math.round(birds), note: note ?? null });
+  if (error) throw error;
 }
 
 export async function logMortality(flockId: string, dead: number, note?: string): Promise<void> {
@@ -154,15 +189,22 @@ export async function logMortality(flockId: string, dead: number, note?: string)
  * Farmers often know how many birds are alive right now but not the
  * running total of losses (e.g. taking over a flock mid-cycle). This
  * reconciles by writing one adjustment row so that
- * placed - sum(mortality) == the live count entered. */
+ * placed - depleted - sum(mortality) == the live count entered.
+ *
+ * IMPORTANT: any birds already recorded as lifted are held aside, so
+ * lowering the live count after a harvest does not re-book those birds as
+ * deaths. Use logDepletion() for a lift; this is only for correcting the
+ * count of birds that are actually still in the house. */
 export async function setLiveCount(
   flockId: string,
   placed: number,
   liveNow: number
 ): Promise<void> {
-  const live = Math.max(0, Math.min(placed, Math.round(liveNow)));
-  const { cumulative_dead } = await getMortalitySummary(flockId);
-  const targetDead = placed - live;
+  const { cumulative_dead, cumulative_depleted } = await getMortalitySummary(flockId);
+  // Birds that have left alive are not available to be counted as dead.
+  const inHouseCapacity = Math.max(0, placed - cumulative_depleted);
+  const live = Math.max(0, Math.min(inHouseCapacity, Math.round(liveNow)));
+  const targetDead = inHouseCapacity - live;
   const delta = targetDead - cumulative_dead;
   if (delta === 0) return;
   if (delta > 0) {

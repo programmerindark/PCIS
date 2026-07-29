@@ -158,3 +158,77 @@ as $$
 $$;
 
 grant execute on function public.log_recommendation to service_role;
+
+-- ---------------------------------------------------------------------
+-- log_recommendation_thin: minute-resolution logging without the bloat.
+--
+-- The full engine response is ~8 kB, over half of it human-readable
+-- explanation strings that are byte-identical from one minute to the next
+-- while conditions hold steady. Storing it every minute costs ~354 MB a
+-- month against a 500 MB free-tier database -- the writes would start
+-- failing about six weeks in, which on this farm means mid-crop.
+--
+-- So: the numeric columns are written EVERY tick, giving an unbroken
+-- minute-by-minute record of what the house was doing and what PCIS
+-- decided. The fat jsonb payload is written only when the decision
+-- actually changed -- a different fan count, a different governing
+-- constraint, pads or heating switching state.
+--
+-- That keeps full forensic detail at exactly the moments something
+-- happened, which is when anyone would ever go looking, and spends
+-- nothing on the long stretches where the answer was the same as the
+-- minute before.
+-- ---------------------------------------------------------------------
+create or replace function public.log_recommendation_thin(
+    p_house_id             uuid,
+    p_flock_id             uuid,
+    p_fans_on              int,
+    p_pads_on              boolean,
+    p_heating_needed       boolean,
+    p_governing_constraint text,
+    p_comfort_index        double precision,
+    p_heat_stress_risk     text,
+    p_air_speed_mps        double precision,
+    p_target_airspeed_mps  double precision,
+    p_vpd_kpa              double precision,
+    p_confidence           double precision,
+    p_payload              jsonb
+) returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    prev record;
+    changed boolean := true;
+begin
+    select fans_on, pads_on, heating_needed, governing_constraint, heat_stress_risk
+      into prev
+      from public.recommendations
+     where house_id = p_house_id
+     order by created_at desc
+     limit 1;
+
+    if found then
+        changed := (prev.fans_on              is distinct from p_fans_on)
+                or (prev.pads_on              is distinct from p_pads_on)
+                or (prev.heating_needed       is distinct from p_heating_needed)
+                or (prev.governing_constraint is distinct from p_governing_constraint)
+                or (prev.heat_stress_risk     is distinct from p_heat_stress_risk);
+    end if;
+
+    insert into public.recommendations
+        (house_id, flock_id, fans_on, pads_on, heating_needed,
+         governing_constraint, comfort_index, heat_stress_risk,
+         air_speed_mps, target_airspeed_mps, vpd_kpa, confidence, payload)
+    values
+        (p_house_id, p_flock_id, p_fans_on, p_pads_on, p_heating_needed,
+         p_governing_constraint, p_comfort_index, p_heat_stress_risk,
+         p_air_speed_mps, p_target_airspeed_mps, p_vpd_kpa, p_confidence,
+         case when changed then p_payload else null end);
+
+    return case when changed then 'changed' else 'steady' end;
+end;
+$$;
+
+grant execute on function public.log_recommendation_thin to service_role;

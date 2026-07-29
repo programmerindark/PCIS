@@ -155,3 +155,29 @@ export async function getValidationHistory(
   }
   return pairs;
 }
+
+
+/** Age of the most recent sensor reading, in minutes, or null if none.
+ *
+ * SAFETY-RELEVANT. When mains power fails at the farm, the Ecowitt
+ * gateway and the WiFi router lose power with everything else, so the
+ * cloud stops receiving data entirely. The failure signature of the event
+ * you most need to catch is therefore SILENCE, not a bad reading.
+ *
+ * Without this check the dashboard would keep displaying the last
+ * successful reading indefinitely, with birds comfortable on screen and a
+ * house with no ventilation in reality. Stale data that looks live is
+ * more dangerous than no data at all, because it actively reassures.
+ */
+export async function getSensorAgeMinutes(houseId: string): Promise<number | null> {
+  const { data, error } = await supabase
+    .from("readings")
+    .select("observed_at")
+    .eq("house_id", houseId)
+    .eq("source", "sensor")
+    .order("observed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  return (Date.now() - new Date((data as any).observed_at).getTime()) / 60000;
+}

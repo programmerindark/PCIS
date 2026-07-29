@@ -186,6 +186,8 @@ export type MortalityResponse = {
   within_target: boolean;
   elevated_today: boolean;
   daily_pct: number;
+  /** Birds removed alive (lifting / thinning) — excluded from mortality. */
+  depleted: number;
   note: string;
 };
 

@@ -61,6 +61,8 @@ class MortalityAssessment:
     elevated_today: bool
     daily_pct: float
     note: str
+    #: Birds removed ALIVE (thinning / lifting / partial depletion).
+    depleted: int = 0
 
 
 def assess(
@@ -68,6 +70,7 @@ def assess(
     cumulative_dead: int,
     age_days: float,
     dead_today: int = 0,
+    depleted: int = 0,
 ) -> MortalityAssessment:
     """Assess a flock's mortality against the cited benchmarks.
 
@@ -76,20 +79,44 @@ def assess(
     placed : int
         Birds originally placed.
     cumulative_dead : int
-        Total deaths so far.
+        Total deaths so far. Birds sent to slaughter are NOT deaths --
+        see `depleted`.
     age_days : float
         Flock age in days (drives the EU ceiling).
     dead_today : int
         Deaths logged for the current day (for the "elevated today" flag).
+    depleted : int
+        Birds removed ALIVE from the house -- thinning, partial depletion,
+        or "lifting". These leave the house and so leave the heat, moisture
+        and CO2 load, but they are emphatically not mortality.
+
+        Keeping this separate is not bookkeeping fussiness. The EU ceiling
+        is roughly 3% at market age; a routine thin removes 20-40% of the
+        flock in a morning. Folding a thin into the death count therefore
+        does not nudge the mortality figure, it detonates it -- reporting a
+        catastrophic welfare failure, on a day when nothing was wrong,
+        while simultaneously destroying the outcome history that makes the
+        logged data worth keeping.
     """
     placed = max(1, placed)
-    cumulative_dead = max(0, min(cumulative_dead, placed))
-    live = placed - cumulative_dead
+    depleted = max(0, min(depleted, placed))
+    # Deaths can only be drawn from birds that were still in the house.
+    cumulative_dead = max(0, min(cumulative_dead, placed - depleted))
+    live = placed - cumulative_dead - depleted
+
+    # Denominator note: the EU cumulative figure is expressed against birds
+    # PLACED, which is what this uses. After a thin the strict reading of
+    # 2007/43/EC (a sum of daily rates, each against birds present that
+    # day) diverges slightly from this, because deaths after the thin fall
+    # on a smaller flock. PCIS keeps the placed-birds denominator because
+    # it is the conservative choice -- it can only ever overstate the
+    # percentage, never flatter it -- and discloses the choice rather than
+    # silently picking the reading that looks better.
     cum_pct = 100.0 * cumulative_dead / placed
     ceiling = acceptable_cumulative_mortality_pct(age_days)
 
     # Daily rate is relative to the live birds at the start of today.
-    live_before_today = max(1, placed - (cumulative_dead - dead_today))
+    live_before_today = max(1, live + dead_today)
     daily_pct = 100.0 * dead_today / live_before_today
     elevated = daily_pct > ELEVATED_DAILY_PCT
 
@@ -111,6 +138,13 @@ def assess(
             f"for day {age_days:g} [EU 2007/43/EC]."
         )
 
+    if depleted > 0:
+        note += (
+            f" {depleted:,} bird(s) have been removed alive (thinning/lifting); "
+            "these are excluded from mortality and from the house heat load, "
+            f"leaving {live:,} in the house."
+        )
+
     return MortalityAssessment(
         live_count=live,
         cumulative_dead=cumulative_dead,
@@ -120,4 +154,5 @@ def assess(
         elevated_today=elevated,
         daily_pct=round(daily_pct, 2),
         note=note,
+        depleted=depleted,
     )

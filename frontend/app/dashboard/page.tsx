@@ -7,9 +7,11 @@ import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabaseClient";
 import {
   getMyFarm, getHouses, getActiveFlock, createFlock, updateFlock, endFlock, birdAgeDays,
-  updateFarmLocation, updateFarmSensor, saveRecommendation, getMortalitySummary, logMortality, setLiveCount, type MortalitySummary,
+  updateFarmLocation, updateFarmSensor, saveRecommendation, getMortalitySummary, logMortality, logDepletion, setLiveCount, type MortalitySummary,
   getSensorHistory, type SensorHistoryPoint,
 } from "@/lib/db";
+import { getSensorAgeMinutes } from "@/lib/validation";
+import { downsample } from "@/lib/activity";
 import { recommend, schedule, advise, mortality, getGrowthCurve, readEcowittCloud, listEcowittDevices, type EcowittReading, type EcowittDevice } from "@/lib/api";
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
 import AppShell from "@/components/AppShell";
@@ -33,10 +35,44 @@ const SEV: Record<string, { c: string; bg: string; ico: string }> = {
   critical: { c: "var(--danger)", bg: "rgba(248,113,113,0.13)", ico: "🔥" },
 };
 
+/** Minutes of sensor silence before PCIS stops trusting the reading.
+ *
+ * A power cut at the farm kills the Ecowitt gateway and the router along
+ * with the fans, so the cloud simply stops hearing anything. Silence is
+ * therefore the signature of the emergency, and a dashboard that keeps
+ * showing the last good reading is actively reassuring at the worst
+ * possible moment.
+ *
+ * Set well above the 10-minute poll interval so ordinary jitter or one
+ * missed upload does not cry wolf, but low enough to matter: with fans
+ * off, a full house gains heat fast (see the power-failure note in the
+ * UI), so the useful unit here is minutes.
+ */
+const SENSOR_STALE_MIN = 25;
+const SENSOR_DEAD_MIN = 45;
+
 const daysAgoISO = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
 
-function deriveAlerts(r: RecommendResponse, house: House, sched: ScheduleResponse | null): Alert[] {
+function deriveAlerts(
+  r: RecommendResponse, house: House, sched: ScheduleResponse | null,
+  sensorAgeMin: number | null,
+): Alert[] {
   const a: Alert[] = [];
+  // Listed first: if the sensor has gone quiet, every other number on this
+  // screen is describing a house we can no longer see.
+  if (sensorAgeMin != null && sensorAgeMin >= SENSOR_DEAD_MIN) {
+    a.push({
+      severity: "critical",
+      title: "Sensor silent — check the house NOW",
+      message: `No reading for ${Math.round(sensorAgeMin)} minutes. A power cut takes the sensor and router down with the fans, so silence often means the ventilation has stopped. Everything below is from the last reading and may no longer be true.`,
+    });
+  } else if (sensorAgeMin != null && sensorAgeMin >= SENSOR_STALE_MIN) {
+    a.push({
+      severity: "warning",
+      title: "Sensor reading is stale",
+      message: `Last reading ${Math.round(sensorAgeMin)} minutes ago. Readings below may be out of date.`,
+    });
+  }
   if (r.bird_status.heat_stress_risk === "High")
     a.push({ severity: "critical", title: "High heat-stress risk", message: "Birds are in the high heat-stress band right now." });
   if (r.fans_on > house.installed_fans)
@@ -109,11 +145,13 @@ export default function DashboardPage() {
   const [flockDate, setFlockDate] = useState(daysAgoISO(28));
   const [editingFlock, setEditingFlock] = useState(false);
 
-  const [mort, setMort] = useState<MortalitySummary>({ cumulative_dead: 0, today_dead: 0 });
+  const [mort, setMort] = useState<MortalitySummary>({ cumulative_dead: 0, today_dead: 0, cumulative_depleted: 0 });
   const [mortAssess, setMortAssess] = useState<MortalityResponse | null>(null);
   const [deaths, setDeaths] = useState(0);
+  const [lifted, setLifted] = useState(0);
   const [growth, setGrowth] = useState<{ day: number; weight_kg: number }[]>([]);
   const [sensorHistory, setSensorHistory] = useState<SensorHistoryPoint[]>([]);
+  const [sensorAgeMin, setSensorAgeMin] = useState<number | null>(null);
   const [showConditions, setShowConditions] = useState(false);
   const [modal, setModal] = useState<null | "climate" | "growth" | "plan" | "sensorHistory">(null);
 
@@ -128,7 +166,11 @@ export default function DashboardPage() {
   const T = (c: number) => +cToDisplay(c, units).toFixed(1);
   const ts = tempSuffix(units);
 
-  const liveCount = flock ? Math.max(0, flock.bird_count - mort.cumulative_dead) : 0;
+  // Lifted birds have left the house: they carry their heat, moisture and
+  // CO2 out with them, so ventilation must size for who is still inside.
+  const liveCount = flock
+    ? Math.max(0, flock.bird_count - mort.cumulative_dead - (mort.cumulative_depleted ?? 0))
+    : 0;
   const age = flock ? birdAgeDays(flock.placement_date) : 0;
   const density = house && liveCount ? liveCount / (house.length_m * house.width_m) : 0;
 
@@ -183,8 +225,8 @@ export default function DashboardPage() {
   }, [router, refreshWeather]);
 
   useEffect(() => {
-    if (flock) getMortalitySummary(flock.id).then(setMort).catch(() => setMort({ cumulative_dead: 0, today_dead: 0 }));
-    else setMort({ cumulative_dead: 0, today_dead: 0 });
+    if (flock) getMortalitySummary(flock.id).then(setMort).catch(() => setMort({ cumulative_dead: 0, today_dead: 0, cumulative_depleted: 0 }));
+    else setMort({ cumulative_dead: 0, today_dead: 0, cumulative_depleted: 0 });
   }, [flock]);
 
   useEffect(() => { getGrowthCurve().then((r) => setGrowth(r.points)).catch(() => setGrowth([])); }, []);
@@ -195,12 +237,19 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!house) { setSensorHistory([]); return; }
     getSensorHistory(house.id, 48).then(setSensorHistory).catch(() => setSensorHistory([]));
+    // Re-checked on a timer, not just on load: a dashboard left open on a
+    // wall display must notice the sensor going quiet, which is what a
+    // power cut at the farm actually looks like from here.
+    const check = () => getSensorAgeMinutes(house.id).then(setSensorAgeMin).catch(() => setSensorAgeMin(null));
+    check();
+    const timer = setInterval(check, 60_000);
+    return () => clearInterval(timer);
   }, [house]);
 
   const compute = useCallback(async () => {
     if (!house || !flock) return;
     setComputing(true); setError("");
-    const live = Math.max(1, flock.bird_count - mort.cumulative_dead);
+    const live = Math.max(1, flock.bird_count - mort.cumulative_dead - (mort.cumulative_depleted ?? 0));
     const base = {
       length_m: house.length_m, width_m: house.width_m, height_m: house.height_m,
       insulation: house.insulation, fan_index: house.fan_index,
@@ -222,7 +271,7 @@ export default function DashboardPage() {
       saveRecommendation(house.id, flock.id, res);
       setAdviceAck(false);
       advise(base).then((a) => setAdvice(a as AdviseResponse)).catch(() => setAdvice(null));
-      mortality({ placed: flock.bird_count, cumulative_dead: mort.cumulative_dead, age_days: birdAgeDays(flock.placement_date), dead_today: mort.today_dead })
+      mortality({ placed: flock.bird_count, cumulative_dead: mort.cumulative_dead, age_days: birdAgeDays(flock.placement_date), dead_today: mort.today_dead, depleted: mort.cumulative_depleted ?? 0 })
         .then((mm) => setMortAssess(mm as MortalityResponse)).catch(() => setMortAssess(null));
       if (profile?.length) setSched((await schedule({ ...base, profile, step_hours: 3 })) as ScheduleResponse);
     } catch (err: any) {
@@ -258,7 +307,7 @@ export default function DashboardPage() {
     if (!flock || !window.confirm("End the current flock and place a new one?")) return;
     await endFlock(flock.id).catch(() => {});
     setFlock(null); setResult(null); setSched(null); setAdvice(null);
-    setMort({ cumulative_dead: 0, today_dead: 0 }); setMortAssess(null);
+    setMort({ cumulative_dead: 0, today_dead: 0, cumulative_depleted: 0 }); setMortAssess(null);
     setFlockDate(daysAgoISO(0)); setFlockCount(20000);
   }
   async function submitDeaths(e: React.FormEvent) {
@@ -266,6 +315,16 @@ export default function DashboardPage() {
     if (!flock || deaths <= 0) return;
     await logMortality(flock.id, Math.round(deaths)).catch((err) => setError(err?.message ?? "Could not log."));
     setDeaths(0);
+    const s = await getMortalitySummary(flock.id).catch(() => null);
+    if (s) setMort(s);
+  }
+  async function submitLift(e: React.FormEvent) {
+    e.preventDefault();
+    if (!flock || lifted <= 0) return;
+    // Separate table, separate meaning: these birds left alive.
+    await logDepletion(flock.id, Math.round(lifted), "lift / thinning")
+      .catch((err) => setError(err?.message ?? "Could not record the lift."));
+    setLifted(0);
     const s = await getMortalitySummary(flock.id).catch(() => null);
     if (s) setMort(s);
   }
@@ -328,7 +387,7 @@ export default function DashboardPage() {
   const series = sched?.series ?? [];
   const ph = result?.predicted_humidity ?? null;
   const tg = result?.tunnel_geometry ?? null;
-  const alerts = result && house ? deriveAlerts(result, house, sched) : [];
+  const alerts = result && house ? deriveAlerts(result, house, sched, sensorAgeMin) : [];
   if (hmx && !hmx.density_within_limit)
     alerts.push({ severity: "warning", title: "Stocking density over limit", message: hmx.note });
   if (hmx && !hmx.co2_within_guideline)
@@ -693,14 +752,18 @@ export default function DashboardPage() {
                     <span className="tile-title">📡 Measured House History</span>
                     <span className="expand-hint">Last 48h · sensor · tap to expand ⤢</span>
                   </div>
+                  {/* Downsampled: 48h at one reading a minute is 2,880
+                      points, which a 620px chart cannot render as anything
+                      but a smear. */}
                   <ClimateTrend
-                    points={sensorHistory
-                      .filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null)
-                      .map((p) => ({
-                        t_c: p.indoor_t_c as number,
-                        rh_pct: p.indoor_rh_pct as number,
-                        label: new Date(p.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-                      }))}
+                    points={downsample(
+                      sensorHistory.filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null),
+                      240
+                    ).map((p) => ({
+                      t_c: p.indoor_t_c as number,
+                      rh_pct: p.indoor_rh_pct as number,
+                      label: new Date(p.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                    }))}
                   />
                 </div>
               )}
@@ -734,10 +797,32 @@ export default function DashboardPage() {
                     {mortAssess.within_target ? "✓" : "⚠"} {mortAssess.cumulative_pct}% cumulative (limit {mortAssess.acceptable_pct}%)
                   </div>
                 )}
+                {(mort.cumulative_depleted ?? 0) > 0 && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: "var(--blue)" }}>
+                    🚚 {mort.cumulative_depleted.toLocaleString()} lifted (sold) — not counted as deaths
+                  </div>
+                )}
                 <form onSubmit={submitDeaths} style={{ display: "flex", gap: 9, alignItems: "end", marginTop: 12 }}>
                   <div><label style={{ marginTop: 0 }}>Log deaths today</label><input type="number" min={0} value={deaths} onChange={(e) => setDeaths(+e.target.value)} style={{ width: 120 }} /></div>
                   <button className="primary" type="submit" style={{ maxWidth: 90, margin: 0 }} disabled={deaths <= 0}>Add</button>
                 </form>
+                {/* Deliberately a SEPARATE form from deaths, not a dropdown on
+                    one field. Birds sold and birds dead look similar in a
+                    database and mean opposite things to a welfare figure —
+                    the EU ceiling is ~3% of the flock and a lift is 20-40%,
+                    so one mis-click would report a disaster that never
+                    happened. Two buttons make the choice explicit. */}
+                <form onSubmit={submitLift} style={{ display: "flex", gap: 9, alignItems: "end", marginTop: 10 }}>
+                  <div>
+                    <label style={{ marginTop: 0 }}>Birds lifted (sold)</label>
+                    <input type="number" min={0} value={lifted} onChange={(e) => setLifted(+e.target.value)} style={{ width: 120 }} />
+                  </div>
+                  <button className="ghost-btn" type="submit" style={{ margin: 0 }} disabled={lifted <= 0}>Record lift</button>
+                </form>
+                <div className="muted" style={{ fontSize: 10.5, marginTop: 6, lineHeight: 1.45 }}>
+                  Use <b>Record lift</b> when birds leave alive for slaughter. They drop out
+                  of the ventilation load but never count as mortality.
+                </div>
               </div>
             </div>
           </div>
@@ -880,7 +965,19 @@ export default function DashboardPage() {
                 </div>
                 <div style={{ display: "flex", gap: 18 }}>
                   <div>
-                    <div className="cap">{sensor?.ok ? "Sensor" : "Measured"}</div>
+                    <div className="cap">
+                      {sensor?.ok ? "Sensor" : "Measured"}
+                      {sensorAgeMin != null && (
+                        <span style={{
+                          marginLeft: 6,
+                          color: sensorAgeMin >= SENSOR_DEAD_MIN ? "var(--danger)"
+                               : sensorAgeMin >= SENSOR_STALE_MIN ? "var(--warn)"
+                               : "var(--ok)",
+                        }}>
+                          {sensorAgeMin < 1 ? "just now" : `${Math.round(sensorAgeMin)}m ago`}
+                        </span>
+                      )}
+                    </div>
                     <div style={{ fontSize: 22, fontWeight: 700, color: sensor?.ok ? "var(--green-bright)" : undefined }}>{inRh}%</div>
                     {sensor?.ok && <div className="muted" style={{ fontSize: 10.5 }}>Ecowitt live</div>}
                   </div>
@@ -951,8 +1048,8 @@ export default function DashboardPage() {
       )}
 
       {modal === "sensorHistory" && sensorHistory.length >= 2 && (() => {
-        const pts = sensorHistory
-          .filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null)
+        const pts = downsample(
+          sensorHistory.filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null), 300)
           .map((p) => ({
             t_c: p.indoor_t_c as number,
             rh_pct: p.indoor_rh_pct as number,

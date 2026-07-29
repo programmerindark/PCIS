@@ -53,6 +53,7 @@ type FarmRow = {
   placement_date: string | null;
   bird_count: number | null;
   cumulative_dead: number;
+  cumulative_depleted: number;
 };
 
 /** Whole days since placement — mirrors lib/db.ts::birdAgeDays. */
@@ -183,7 +184,14 @@ export async function GET(req: Request) {
       }
 
       try {
-        const liveBirds = Math.max(1, (farm.bird_count as number) - (farm.cumulative_dead ?? 0));
+        // Lifted birds have physically left the house, so they take their heat
+        // and moisture with them. Sizing ventilation for birds that are no
+        // longer there would over-ventilate a half-empty house — which in
+        // cold weather chills the ones that remain.
+        const liveBirds = Math.max(
+          1,
+          (farm.bird_count as number) - (farm.cumulative_dead ?? 0) - (farm.cumulative_depleted ?? 0)
+        );
         const recRes = await fetch(`${apiBase.replace(/\/$/, "")}/recommend`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -215,7 +223,7 @@ export async function GET(req: Request) {
         }
         const rec = await recRes.json();
 
-        const { error: recErr } = await admin.rpc("log_recommendation", {
+        const { data: recMode, error: recErr } = await admin.rpc("log_recommendation_thin", {
           p_house_id: farm.house_id,
           p_flock_id: farm.flock_id,
           p_fans_on: rec.fans_on ?? null,
@@ -230,9 +238,12 @@ export async function GET(req: Request) {
           p_confidence: rec.action_confidence ?? rec.confidence_score ?? null,
           p_payload: rec,
         });
+        // "steady" means the decision was identical to the previous tick,
+        // so the numeric row was written but the 8 kB explanation payload
+        // was not — see log_recommendation_thin in the migration.
         results[farm.farm_id] = recErr
           ? `logged (recommendation not saved: ${recErr.message})`
-          : "logged + advised";
+          : `logged + advised (${recMode ?? "ok"})`;
       } catch (e: any) {
         // The reading is already safely stored; a slow or sleeping engine
         // must not cost us the measurement.
