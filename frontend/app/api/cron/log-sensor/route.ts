@@ -38,7 +38,28 @@ type FarmRow = {
   ecowitt_api_key: string;
   ecowitt_mac: string;
   ecowitt_indoor_block: string | null;
+  // House geometry + equipment, so the engine can be run unattended.
+  length_m: number;
+  width_m: number;
+  height_m: number;
+  insulation: string;
+  fan_index: number;
+  installed_fans: number;
+  static_pressure_pa: number;
+  has_cooling_pads: boolean;
+  heater_kw: number;
+  // Active flock; null between crops.
+  flock_id: string | null;
+  placement_date: string | null;
+  bird_count: number | null;
+  cumulative_dead: number;
 };
+
+/** Whole days since placement — mirrors lib/db.ts::birdAgeDays. */
+function birdAgeDays(placementDate: string): number {
+  const ms = Date.now() - new Date(placementDate + "T00:00:00").getTime();
+  return Math.max(0, Math.floor(ms / 86_400_000));
+}
 
 function num(v: unknown): number | null {
   if (v == null) return null;
@@ -132,7 +153,91 @@ export async function GET(req: Request) {
         p_pressure_hpa: c.pressure_hpa,
         p_measured_air_speed_mps: c.measured_air_speed_mps,
       });
-      results[farm.farm_id] = rpcErr ? `insert failed: ${rpcErr.message}` : "logged";
+      if (rpcErr) {
+        results[farm.farm_id] = `insert failed: ${rpcErr.message}`;
+        continue;
+      }
+
+      // ---- Run the engine on what was just measured -------------------
+      // A reading on its own records what the house did. Pairing it with
+      // the engine's output records what PCIS BELIEVED at that moment --
+      // and only the pair can later be scored (predicted humidity vs
+      // measured humidity, computed air speed vs measured air speed).
+      //
+      // Skipped when the house is empty: no birds means no heat load and
+      // nothing to advise, so a recommendation would be noise in the
+      // dataset rather than a data point.
+      const canAdvise =
+        farm.flock_id && farm.placement_date && farm.bird_count != null &&
+        c.indoor_rh_pct != null && c.outdoor_t_c != null && c.outdoor_rh_pct != null;
+
+      if (!canAdvise) {
+        results[farm.farm_id] = farm.flock_id ? "logged (incomplete reading)" : "logged (no active flock)";
+        continue;
+      }
+
+      const apiBase = process.env.NEXT_PUBLIC_PCIS_API_URL;
+      if (!apiBase) {
+        results[farm.farm_id] = "logged (engine URL not configured)";
+        continue;
+      }
+
+      try {
+        const liveBirds = Math.max(1, (farm.bird_count as number) - (farm.cumulative_dead ?? 0));
+        const recRes = await fetch(`${apiBase.replace(/\/$/, "")}/recommend`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(30_000),
+          body: JSON.stringify({
+            length_m: farm.length_m,
+            width_m: farm.width_m,
+            height_m: farm.height_m,
+            insulation: farm.insulation,
+            fan_index: farm.fan_index,
+            installed_fans: farm.installed_fans,
+            static_pressure_pa: farm.static_pressure_pa,
+            cooling_pads: farm.has_cooling_pads,
+            heater_kw: farm.heater_kw,
+            bird_age_days: birdAgeDays(farm.placement_date as string),
+            bird_count: liveBirds,
+            // Measured, not typed. This is the whole point.
+            indoor_rh_pct: c.indoor_rh_pct,
+            outdoor_t_c: c.outdoor_t_c,
+            outdoor_rh_pct: c.outdoor_rh_pct,
+            pressure_hpa: c.pressure_hpa ?? undefined,
+            measured_air_speed_mps: c.measured_air_speed_mps ?? undefined,
+          }),
+        });
+
+        if (!recRes.ok) {
+          results[farm.farm_id] = `logged (engine ${recRes.status})`;
+          continue;
+        }
+        const rec = await recRes.json();
+
+        const { error: recErr } = await admin.rpc("log_recommendation", {
+          p_house_id: farm.house_id,
+          p_flock_id: farm.flock_id,
+          p_fans_on: rec.fans_on ?? null,
+          p_pads_on: rec.pads_on ?? null,
+          p_heating_needed: rec.heating_needed ?? null,
+          p_governing_constraint: rec.governing_constraint ?? null,
+          p_comfort_index: rec.bird_status?.comfort_score ?? null,
+          p_heat_stress_risk: rec.bird_status?.heat_stress_risk ?? null,
+          p_air_speed_mps: rec.air_speed_mps ?? null,
+          p_target_airspeed_mps: rec.target_airspeed_mps ?? null,
+          p_vpd_kpa: rec.vpd_kpa ?? null,
+          p_confidence: rec.action_confidence ?? rec.confidence_score ?? null,
+          p_payload: rec,
+        });
+        results[farm.farm_id] = recErr
+          ? `logged (recommendation not saved: ${recErr.message})`
+          : "logged + advised";
+      } catch (e: any) {
+        // The reading is already safely stored; a slow or sleeping engine
+        // must not cost us the measurement.
+        results[farm.farm_id] = `logged (engine unreachable: ${e?.message ?? "timeout"})`;
+      }
     } catch (e: any) {
       results[farm.farm_id] = `fetch failed: ${e?.message ?? "unknown"}`;
     }

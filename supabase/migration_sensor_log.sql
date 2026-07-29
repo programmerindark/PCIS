@@ -81,9 +81,28 @@ create or replace view public.farms_with_ecowitt_keys as
         f.ecowitt_application_key,
         f.ecowitt_api_key,
         f.ecowitt_mac,
-        f.ecowitt_indoor_block
+        f.ecowitt_indoor_block,
+        -- House geometry + equipment: everything /recommend needs, so the
+        -- cron can run the ENGINE on the measured conditions rather than
+        -- only filing away raw numbers. Without this the database would
+        -- accumulate a record of what the house did but no record of what
+        -- PCIS would have said about it -- and a prediction that was never
+        -- written down cannot later be scored against the outcome.
+        h.length_m, h.width_m, h.height_m, h.insulation,
+        h.fan_index, h.installed_fans, h.static_pressure_pa,
+        h.has_cooling_pads, h.heater_kw,
+        -- Active flock, for bird age and count. Null when the house is
+        -- empty between crops, in which case the poller logs the reading
+        -- but skips the recommendation (no birds, nothing to advise).
+        fl.id            as flock_id,
+        fl.placement_date,
+        fl.bird_count,
+        coalesce((
+            select sum(m.dead) from public.mortality m where m.flock_id = fl.id
+        ), 0)::int       as cumulative_dead
     from public.farms f
     join public.houses h on h.farm_id = f.id
+    left join public.flocks fl on fl.house_id = h.id and fl.active
     where f.ecowitt_application_key is not null
       and f.ecowitt_api_key is not null
       and f.ecowitt_mac is not null
@@ -91,3 +110,51 @@ create or replace view public.farms_with_ecowitt_keys as
 
 revoke all on public.farms_with_ecowitt_keys from anon, authenticated;
 grant select on public.farms_with_ecowitt_keys to service_role;
+
+-- ---------------------------------------------------------------------
+-- log_recommendation: the cron job's counterpart to log_sensor_reading.
+--
+-- Storing the engine's output next to the measurement it was computed
+-- from is the entire point of unattended logging. A `readings` row says
+-- what the house was doing; the matching `recommendations` row says what
+-- PCIS believed about it at that moment -- what it predicted the indoor
+-- humidity would be, how fast it computed the air to be moving, how many
+-- fans it would have run.
+--
+-- Once both exist on the same timeline, claims the engine currently makes
+-- on the strength of cited literature and engineering judgment become
+-- checkable against this specific house: predicted vs measured humidity,
+-- computed vs measured air speed. That is the difference between a
+-- confidence score someone assigned and one the data earned.
+-- ---------------------------------------------------------------------
+create or replace function public.log_recommendation(
+    p_house_id             uuid,
+    p_flock_id             uuid,
+    p_fans_on              int,
+    p_pads_on              boolean,
+    p_heating_needed       boolean,
+    p_governing_constraint text,
+    p_comfort_index        double precision,
+    p_heat_stress_risk     text,
+    p_air_speed_mps        double precision,
+    p_target_airspeed_mps  double precision,
+    p_vpd_kpa              double precision,
+    p_confidence           double precision,
+    p_payload              jsonb
+) returns void
+language sql
+security definer
+set search_path = public
+as $$
+    insert into public.recommendations
+        (house_id, flock_id, fans_on, pads_on, heating_needed,
+         governing_constraint, comfort_index, heat_stress_risk,
+         air_speed_mps, target_airspeed_mps, vpd_kpa, confidence, payload)
+    values
+        (p_house_id, p_flock_id, p_fans_on, p_pads_on, p_heating_needed,
+         p_governing_constraint, p_comfort_index, p_heat_stress_risk,
+         p_air_speed_mps, p_target_airspeed_mps, p_vpd_kpa, p_confidence,
+         p_payload);
+$$;
+
+grant execute on function public.log_recommendation to service_role;

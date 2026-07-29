@@ -16,6 +16,7 @@ export default function Nav({ email }: { email: string | null }) {
   const links = [
     { href: "/dashboard", label: "Dashboard" },
     { href: "/houses", label: "Houses" },
+    { href: "/validation", label: "Validation" },
   ];
 
   return (
