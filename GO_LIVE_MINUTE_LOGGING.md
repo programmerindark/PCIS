@@ -76,26 +76,58 @@ once a minute.
 
 ## Step 4 — Set up the 1-minute poller
 
+**First, find your app's URL.** Vercel dashboard → your PCIS project → the
+**Domains** panel on the project overview, or the big link at the top of
+the latest deployment. It looks like `https://pcis.vercel.app` or
+`https://pcis-abc123.vercel.app`.
+
+Use the **production** domain (the short one without a random suffix), not
+a preview URL — preview deployments change address on every push, so a
+poller pointed at one silently stops working the next time you commit.
+
+Paste it into your browser first and confirm the login page loads. That
+same origin plus `/api/cron/log-sensor` is what goes below.
+
 [cron-job.org](https://cron-job.org) — free, allows up to 60 executions per
 hour. Sign up, then **Create cronjob**:
 
 | Field | Value |
 |---|---|
 | Title | PCIS sensor poll |
-| URL | `https://YOUR-APP.vercel.app/api/cron/log-sensor` |
-| Schedule | Every 1 minute |
-| Request method | GET |
+| URL | `<your production URL>/api/cron/log-sensor` |
+| Execution schedule | **Every 1 minute** |
 
-Then open **Advanced / Headers** and add:
+So if your app is at `https://pcis.vercel.app`, the URL field is
+`https://pcis.vercel.app/api/cron/log-sensor`.
+
+**Request method:** there's no method selector on the main form because
+GET is the default, which is what this endpoint expects. Leave it alone.
+(If you want to see it, it's under the **Advanced** tab — but there's
+nothing to change.)
+
+**The header.** Scroll to the **Headers** section. It gives you two boxes,
+**Key** and **Value** — not one line. Fill them in like this:
+
+| Box | What goes in it |
+|---|---|
+| Key | `Authorization` |
+| Value | `Bearer YOUR_CRON_SECRET` |
+
+The word **Bearer**, then a single space, then the secret — all of that
+goes in the **Value** box. `Authorization` alone goes in **Key**, with no
+colon.
+
+So if your secret is `x7Kp2mQ9`, the Value box contains exactly:
 
 ```
-Authorization: Bearer YOUR_CRON_SECRET
+Bearer x7Kp2mQ9
 ```
 
-Same value as `CRON_SECRET` in your Vercel environment variables. Without
-this header the endpoint returns 401 and logs nothing.
+It must match `CRON_SECRET` in your Vercel environment variables exactly.
+Get this wrong and the endpoint returns **401** and logs nothing — which
+is the single most common failure here, so check it before saving.
 
-Save and enable.
+Save and make sure the job is **enabled**.
 
 **Check:** cron-job.org's execution history shows `200` responses. Click
 one — the body should read something like:
@@ -170,7 +202,7 @@ against the 750 free — just inside, but worth knowing it's close.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| cron-job.org shows 401 | Missing or wrong `Authorization` header | Must exactly match `CRON_SECRET` in Vercel |
+| cron-job.org shows 401 | Header wrong | Key = `Authorization` (no colon), Value = `Bearer ` + your secret. Must match `CRON_SECRET` in Vercel exactly |
 | `"logged (no active flock)"` | House has no active flock | Dashboard → set up the current flock |
 | `"logged (engine unreachable)"` | Render asleep or slow | Harmless — the reading was still saved. Should stop once polling keeps it warm |
 | `"insert failed: ... log_recommendation_thin"` | Step 1a not run | Re-run `migration_sensor_log.sql` |
