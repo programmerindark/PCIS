@@ -8,6 +8,7 @@ import {
 } from "@/lib/db";
 import { getCatalog } from "@/lib/api";
 import AppShell from "@/components/AppShell";
+import ChickenLoader from "@/components/ChickenLoader";
 import { useUnits, metresToDisplay, displayToMetres, lengthSuffix } from "@/lib/units";
 import type { Farm, House, Catalog } from "@/lib/types";
 
@@ -102,7 +103,7 @@ export default function HousesPage() {
     }
   }
 
-  if (loading) return <div className="auth-wrap"><div className="muted">Loading…</div></div>;
+  if (loading) return <div className="auth-wrap"><ChickenLoader /></div>;
 
   return (
     <AppShell

@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { getMyFarm, getHouses } from "@/lib/db";
 import AppShell from "@/components/AppShell";
+import ChickenLoader from "@/components/ChickenLoader";
 import { getRecentActivity, type ActivityRow } from "@/lib/activity";
 import { useUnits, cToDisplay, tempSuffix } from "@/lib/units";
 import type { Farm, House } from "@/lib/types";
@@ -77,7 +78,7 @@ export default function HistoryPage() {
   const shown = changesOnly ? rows.filter((r, i) => r.changed || i === 0) : rows;
   const changeCount = rows.filter((r) => r.changed).length;
 
-  if (loading) return <AppShell email={email}><div className="muted">Loading…</div></AppShell>;
+  if (loading) return <AppShell email={email}><ChickenLoader /></AppShell>;
 
   return (
     <AppShell email={email}>

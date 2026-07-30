@@ -15,6 +15,7 @@ import { downsample } from "@/lib/activity";
 import { recommend, schedule, advise, mortality, getGrowthCurve, readEcowittCloud, listEcowittDevices, type EcowittReading, type EcowittDevice } from "@/lib/api";
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
 import AppShell from "@/components/AppShell";
+import ChickenLoader from "@/components/ChickenLoader";
 import Modal from "@/components/Modal";
 import { ClimateTrend, GrowthCurve, Sparkline } from "@/components/Charts";
 import LocationPicker from "@/components/LocationPicker";
@@ -25,7 +26,7 @@ import type {
 
 const House3D = dynamic(() => import("@/components/House3D"), {
   ssr: false,
-  loading: () => <div style={{ height: 340, display: "grid", placeItems: "center", color: "var(--ink-muted)" }}>Loading house view…</div>,
+  loading: () => <div style={{ height: 340, display: "grid", placeItems: "center" }}><ChickenLoader label="Loading house view…" /></div>,
 });
 
 const RISK_COLOR: Record<string, string> = { Low: "var(--ok)", Moderate: "var(--warn)", High: "var(--danger)" };
@@ -422,7 +423,7 @@ export default function DashboardPage() {
     await refreshWeather(nf);
   }
 
-  if (loading) return <div className="auth-wrap"><div className="muted">Loading…</div></div>;
+  if (loading) return <div className="auth-wrap"><ChickenLoader /></div>;
 
   const bs = result?.bird_status;
   const hmx = result?.house_metrics;

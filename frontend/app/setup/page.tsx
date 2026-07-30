@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import ChickenLoader from "@/components/ChickenLoader";
 import { getMyFarm, createFarm } from "@/lib/db";
 
 export default function SetupPage() {
@@ -45,7 +46,7 @@ export default function SetupPage() {
   if (!ready) {
     return (
       <div className="auth-wrap">
-        <div className="muted">Loading…</div>
+        <ChickenLoader />
       </div>
     );
   }

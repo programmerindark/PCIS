@@ -14,6 +14,7 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { getMyFarm, getHouses } from "@/lib/db";
 import AppShell from "@/components/AppShell";
+import ChickenLoader from "@/components/ChickenLoader";
 import { ValidationChart } from "@/components/ValidationChart";
 import {
   getValidationHistory, errorStats, type ValidationPair, type ErrorStats,
@@ -102,7 +103,7 @@ export default function ValidationPage() {
   const speedStats = errorStats(pairs, (p) => [p.computedSpeed, p.measuredSpeed]);
   const rhStats = errorStats(pairs, (p) => [p.predictedRh, p.measuredRh]);
 
-  if (loading) return <AppShell email={email}><div className="muted">Loading…</div></AppShell>;
+  if (loading) return <AppShell email={email}><ChickenLoader /></AppShell>;
 
   return (
     <AppShell email={email}>
