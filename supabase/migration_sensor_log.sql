@@ -30,6 +30,24 @@ alter table public.readings
 -- frontend/app/api/cron/log-sensor/route.ts). This is narrower than
 -- handing the cron job a service-role key with blanket table access.
 -- ---------------------------------------------------------------------
+--
+-- DEDUPLICATION. Returns 'logged' or 'skipped'.
+--
+-- Several schedulers can end up pointed at the same endpoint -- a
+-- cron-job.org minute poll, a GitHub Actions workflow, Vercel's own cron,
+-- plus manual test hits while debugging. Live data showed 15 minutes out of
+-- 98 carrying two to seven rows each.
+--
+-- The damage is not just wasted rows. Duplicates within one minute get
+-- compared against each other by the change-detection logic, so a stable
+-- engine looks like it is oscillating: the raw count showed 32 fan changes
+-- in 200 rows, while deduplicating to one row per minute revealed only 2
+-- real changes in 102 minutes. A guard here is more robust than trying to
+-- keep every external scheduler disciplined, because it holds no matter
+-- how many callers appear later.
+--
+-- 40 seconds rather than 60: a poll running slightly early must not be
+-- rejected, but a genuine second poll within the same minute must be.
 create or replace function public.log_sensor_reading(
     p_house_id        uuid,
     p_indoor_t_c       double precision,
@@ -38,17 +56,29 @@ create or replace function public.log_sensor_reading(
     p_outdoor_rh_pct   double precision,
     p_pressure_hpa     double precision,
     p_measured_air_speed_mps double precision
-) returns void
-language sql
+) returns text
+language plpgsql
 security definer
 set search_path = public
 as $$
+begin
+    if exists (
+        select 1 from public.readings
+         where house_id = p_house_id
+           and source = 'sensor'
+           and observed_at > now() - interval '40 seconds'
+    ) then
+        return 'skipped';
+    end if;
+
     insert into public.readings
         (house_id, indoor_t_c, indoor_rh_pct, outdoor_t_c, outdoor_rh_pct,
          pressure_hpa, measured_air_speed_mps, source)
     values
         (p_house_id, p_indoor_t_c, p_indoor_rh_pct, p_outdoor_t_c, p_outdoor_rh_pct,
          p_pressure_hpa, p_measured_air_speed_mps, 'sensor');
+    return 'logged';
+end;
 $$;
 
 -- Deliberately service_role ONLY, not anon or authenticated. The cron

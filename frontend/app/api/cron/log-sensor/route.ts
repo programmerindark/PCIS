@@ -145,7 +145,7 @@ export async function GET(req: Request) {
         continue;
       }
 
-      const { error: rpcErr } = await admin.rpc("log_sensor_reading", {
+      const { data: logMode, error: rpcErr } = await admin.rpc("log_sensor_reading", {
         p_house_id: farm.house_id,
         p_indoor_t_c: c.indoor_t_c,
         p_indoor_rh_pct: c.indoor_rh_pct,
@@ -156,6 +156,14 @@ export async function GET(req: Request) {
       });
       if (rpcErr) {
         results[farm.farm_id] = `insert failed: ${rpcErr.message}`;
+        continue;
+      }
+      // Another scheduler already logged this minute. Stop here rather than
+      // running the engine again: a second recommendation for the same
+      // reading is not extra information, and duplicate rows within one
+      // minute make a stable engine look like it is oscillating.
+      if (logMode === "skipped") {
+        results[farm.farm_id] = "skipped (already logged this minute)";
         continue;
       }
 
