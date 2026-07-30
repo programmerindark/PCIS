@@ -85,6 +85,8 @@ export type CeilingOption = {
   velocity_fpm: number;
   meets_tunnel_target: boolean;
   windchill_effective: boolean;
+  /** Fans required to hit the tunnel target at this cross-section. */
+  fans_needed: number | null;
 };
 
 export type TunnelGeometry = {
@@ -111,12 +113,30 @@ export type RecommendResponse = {
   air_speed_mps: number | null;
   target_airspeed_mps: number | null;
   effective_temp_c: number | null;
+  /** Felt-temperature uncertainty band. A range rather than a point,
+   *  because nothing in the sensor stack can measure what a bird feels. */
+  felt_band: {
+    likely_c: number;
+    warm_bound_c: number;
+    cool_bound_c: number;
+    band_width_c: number;
+    widened_by_humidity: boolean;
+  } | null;
   vpd_kpa: number;
   achievable_indoor_t_c: number | null;
   felt_comfort_index: number | null;
   moisture_control_limited: boolean;
   /** Outdoor RH below which ventilation starts drying the house again. */
   outdoor_rh_for_drying_pct: number | null;
+  /** Measured RH vs what a SKOV Viper Touch expects at this age. Context
+   *  only — drives no calculation. */
+  skov_humidity_benchmark: {
+    expected_pct: number;
+    measured_pct: number;
+    excess_pct: number;
+    above_controller_limit: boolean;
+    source: string;
+  } | null;
   /** Anemometer reading from inside the house, when a sensor supplies one. */
   measured_air_speed_mps: number | null;
   /** "agree" | "measured_lower" | "measured_higher" */

@@ -107,6 +107,37 @@ def expected_humidity_pct(age_days: float) -> float:
     return _interp(HUMIDITY_PCT, age_days)
 
 
+def compare_humidity(age_days: float, indoor_rh_pct: float) -> dict:
+    """Measured humidity against what a SKOV Viper Touch would expect.
+
+    Why this is worth having, given SKOV's curve cannot fix the real gap:
+
+    Aviagen's target-temperature table stops at 70% RH, so above that PCIS
+    clamps and warns that the target it shows is a floor. That warning is
+    honest but abstract -- "outside the tested range" does not tell an
+    operator whether 96% is slightly unusual or wildly wrong.
+
+    SKOV's curve answers a DIFFERENT question (what humidity is acceptable
+    at this age, not what temperature to hold), so it cannot extend the
+    Aviagen table. But it is a working commercial controller's own
+    judgement, which makes it a legitimate BENCHMARK: it converts "we have
+    no data up here" into "a real controller would consider you N points
+    past its limit". Same data, and the second form is actionable.
+
+    Deliberately not fed into any calculation -- it changes no fan count
+    and no setpoint. It is context for the operator, and reported as such.
+    """
+    expected = expected_humidity_pct(age_days)
+    excess = indoor_rh_pct - expected
+    return {
+        "expected_pct": round(expected, 0),
+        "measured_pct": round(indoor_rh_pct, 0),
+        "excess_pct": round(excess, 0),
+        "above_controller_limit": excess > 0.0,
+        "source": "SKOV Viper Touch humidity curve",
+    }
+
+
 def minimum_ventilation_m3_per_h_per_bird(age_days: float) -> float:
     return _interp(MINIMUM_VENTILATION_M3_PER_H_PER_BIRD, age_days)
 

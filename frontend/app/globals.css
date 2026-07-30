@@ -327,3 +327,17 @@ button.primary:disabled { opacity: 0.45; cursor: default; transform: none; box-s
 @media (prefers-reduced-motion: reduce) {
   .status-dot-lg { animation: none !important; }
 }
+
+/* Detail affordance on metric cards. Deliberately low-contrast: it should
+   read as "there is more here" without competing with the number itself. */
+.metric-more {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.4;
+}
+.metric[role="button"]:hover .metric-more,
+.metric[role="button"]:focus-visible .metric-more { opacity: 0.9; }
+.metric[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

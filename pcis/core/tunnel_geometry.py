@@ -35,6 +35,7 @@ Honesty notes
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from pcis.core import target_airspeed as tas
@@ -64,14 +65,46 @@ class CeilingOption:
     velocity_fpm: float
     meets_tunnel_target: bool          # >= 3.0 m/s   [Cobb]
     windchill_effective: bool          # >= 2.54 m/s  [Aviagen]
+    #: Fans required to hit the tunnel target at THIS cross-section.
+    #:
+    #: The operator's real question about a drop ceiling is not "what
+    #: velocity would I get" but "how many fans would it save me". A lower
+    #: ceiling shrinks the cross-section, so the same target velocity needs
+    #: proportionally less airflow -- and fans are the expensive part.
+    #: None when no per-fan airflow was supplied.
+    fans_needed: int | None = None
+
+
+def fans_for_velocity(
+    target_velocity_mps: float,
+    cross_section_m2: float,
+    airflow_per_fan_m3_per_h: float,
+) -> int:
+    """Fans needed to reach a target velocity through a given cross-section.
+
+    Continuity in reverse: airflow = velocity x area, then divide by what
+    one fan delivers at the design static pressure and round UP, because a
+    fraction of a fan does not exist and rounding down would under-ventilate.
+    """
+    if airflow_per_fan_m3_per_h <= 0 or cross_section_m2 <= 0:
+        return 0
+    required = target_velocity_mps * cross_section_m2 * 3600.0
+    return int(math.ceil(required / airflow_per_fan_m3_per_h))
 
 
 def velocity_table(
     airflow_m3_per_h: float,
     house_width_m: float,
     heights_m: list[float],
+    airflow_per_fan_m3_per_h: float | None = None,
 ) -> list[CeilingOption]:
-    """Velocity achieved at each candidate ceiling height."""
+    """Velocity achieved at each candidate ceiling height.
+
+    When `airflow_per_fan_m3_per_h` is supplied, each row also reports the
+    fan count needed to hit the tunnel target at that height -- which is
+    the number that actually decides whether lowering a ceiling is worth
+    doing.
+    """
     out: list[CeilingOption] = []
     for h in heights_m:
         area = house_width_m * h
@@ -83,6 +116,11 @@ def velocity_table(
             velocity_fpm=round(v * 196.85, 0),
             meets_tunnel_target=v >= tas.TUNNEL_TARGET_AIRSPEED_MPS,
             windchill_effective=v >= tas.EFFECTIVE_WINDCHILL_THRESHOLD_MPS,
+            fans_needed=(
+                fans_for_velocity(tas.TUNNEL_TARGET_AIRSPEED_MPS, area,
+                                  airflow_per_fan_m3_per_h)
+                if airflow_per_fan_m3_per_h else None
+            ),
         ))
     return out
 

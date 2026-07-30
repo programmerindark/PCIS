@@ -7,7 +7,7 @@ import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabaseClient";
 import {
   getMyFarm, getHouses, getActiveFlock, createFlock, updateFlock, endFlock, birdAgeDays,
-  updateFarmLocation, updateFarmSensor, saveRecommendation, getMortalitySummary, logMortality, logDepletion, setLiveCount, type MortalitySummary,
+  updateHouse, updateFarmLocation, updateFarmSensor, saveRecommendation, getMortalitySummary, logMortality, logDepletion, setLiveCount, type MortalitySummary,
   getSensorHistory, type SensorHistoryPoint,
 } from "@/lib/db";
 import { getSensorAgeMinutes } from "@/lib/validation";
@@ -159,7 +159,12 @@ export default function DashboardPage() {
   // background log, not the screen — cheerfully said "just now".
   const [autoTick, setAutoTick] = useState(0);
   const [showConditions, setShowConditions] = useState(false);
-  const [modal, setModal] = useState<null | "climate" | "growth" | "plan" | "sensorHistory">(null);
+  const [modal, setModal] = useState<
+    null | "climate" | "growth" | "plan" | "sensorHistory"
+    | "comfort" | "feelTemp" | "heatStress" | "fans"
+  >(null);
+  // What-if ceiling height for the fan-shortfall panel, in metres.
+  const [whatIfCeiling, setWhatIfCeiling] = useState<number | null>(null);
 
   const [showLocation, setShowLocation] = useState(false);
   const [showSensor, setShowSensor] = useState(false);
@@ -678,22 +683,22 @@ export default function DashboardPage() {
                 sub={result?.felt_comfort_index != null
                   ? `as felt · ${bs?.comfort_score ?? "—"}% dry-bulb`
                   : (bs?.comfort_label ?? "")}
-                pct={result?.felt_comfort_index ?? bs?.comfort_score ?? 0} />
+                pct={result?.felt_comfort_index ?? bs?.comfort_score ?? 0} onClick={() => setModal("comfort")} />
               <Metric icon="🌡" label="Feel Temperature" color="var(--blue)"
                 value={result?.effective_temp_c != null ? `${result.effective_temp_c.toFixed(1)}°` : "—"}
                 sub={result && result.effective_temp_c != null && result.achievable_indoor_t_c != null
                   ? `house ${result.achievable_indoor_t_c.toFixed(1)}° · target ${result.comfort.target_temp_c.toFixed(1)}°`
                   : `Target ${result?.comfort.target_temp_c.toFixed(1) ?? "—"}°C`}
                 pct={result?.effective_temp_c != null ? Math.min(100, (result.effective_temp_c / 40) * 100) : 0}
-                spark={series.map((s) => s.effective_temp_c)} />
+                spark={series.map((s) => s.effective_temp_c)} onClick={() => setModal("feelTemp")} />
               <Metric icon="🔥" label="Heat Stress" color={RISK_COLOR[bs?.heat_stress_risk ?? "Low"]}
                 value={bs?.heat_stress_risk ?? "—"} sub={`Panting ${bs?.panting_index ?? "—"}`}
-                pct={bs?.heat_stress_risk === "High" ? 100 : bs?.heat_stress_risk === "Moderate" ? 60 : 25} />
+                pct={bs?.heat_stress_risk === "High" ? 100 : bs?.heat_stress_risk === "Moderate" ? 60 : 25} onClick={() => setModal("heatStress")} />
               <Metric icon="🌀" label="Fans Running" color={result && result.fans_on > house.installed_fans ? "var(--red)" : "var(--teal)"}
                 value={result ? `${result.fans_on}/${house.installed_fans}` : "—"}
                 sub={`${result?.pads_on ? "Pads ON" : "Pads off"}${result?.heating_needed ? " · Heat ON" : ""}`}
                 pct={Math.min(100, ((result?.fans_on ?? 0) / Math.max(1, house.installed_fans)) * 100)}
-                spark={series.map((s) => s.fans_on)} />
+                spark={series.map((s) => s.fans_on)} onClick={() => setModal("fans")} />
               <Metric icon="📉" label="Mortality" color={mortAssess && !mortAssess.within_target ? "var(--red)" : "var(--orange)"}
                 value={mortAssess ? `${mortAssess.cumulative_pct}%` : "—"}
                 sub={`Limit ${mortAssess?.acceptable_pct ?? "—"}% · ${mort.cumulative_dead.toLocaleString()} birds`}
@@ -1090,6 +1095,286 @@ export default function DashboardPage() {
         </Modal>
       )}
 
+      {modal === "fans" && result && house && (() => {
+        const geo = result.tunnel_geometry;
+        const short = result.fans_on > house.installed_fans;
+        const opts = geo?.options ?? [];
+        const baseFans = opts.length ? opts[0].fans_needed : null;
+        // What-if row: either the height the operator typed, or nothing.
+        const pick = whatIfCeiling != null
+          ? opts.reduce((best, o) =>
+              Math.abs(o.ceiling_height_m - whatIfCeiling) < Math.abs(best.ceiling_height_m - whatIfCeiling) ? o : best,
+              opts[0])
+          : null;
+        return (
+          <Modal
+            title="Fans Running"
+            subtitle={short ? "You are short of fans — here is the alternative to buying more" : "How the fan count is decided"}
+            onClose={() => setModal(null)}
+          >
+            <div className="stats">
+              <div className="stat"><div className="k">Needed</div><div className="v" style={{ color: short ? "var(--danger)" : undefined }}>{result.fans_on}</div></div>
+              <div className="stat"><div className="k">Installed</div><div className="v">{house.installed_fans}</div></div>
+              <div className="stat"><div className="k">Governed by</div><div className="v" style={{ fontSize: 15 }}>{result.governing_constraint.replace(/_/g, " ")}</div></div>
+              <div className="stat"><div className="k">Air speed now</div><div className="v">{result.air_speed_mps ?? "—"}<span className="u"> m/s</span></div><div className="u" style={{ fontSize: 10.5 }}>target {result.target_airspeed_mps ?? "—"}</div></div>
+            </div>
+
+            {short && (
+              <div className="tile" style={{ marginTop: 14, borderColor: "var(--warn)" }}>
+                <b>⚠ {result.fans_on - house.installed_fans} fans short.</b>
+                <div className="muted" style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.55 }}>
+                  Buying fans is one answer. The cheaper one is usually geometry: air speed is
+                  airflow divided by cross-section, so lowering the ceiling raises the speed
+                  without moving any more air. Same birds, same fans, more wind chill.
+                </div>
+              </div>
+            )}
+
+            {opts.length > 0 && (
+              <div className="tile" style={{ marginTop: 14, overflowX: "auto" }}>
+                <div className="tile-title">Ceiling height vs fans needed</div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 8 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "var(--ink-muted)", fontSize: 11.5 }}>
+                      <th style={{ padding: "6px 8px" }}>Ceiling</th>
+                      <th style={{ padding: "6px 8px" }}>Cross-section</th>
+                      <th style={{ padding: "6px 8px" }}>Air speed</th>
+                      <th style={{ padding: "6px 8px" }}>Fans needed</th>
+                      <th style={{ padding: "6px 8px" }}>Saves</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {opts.map((o, i) => {
+                      const saves = baseFans != null && o.fans_needed != null ? baseFans - o.fans_needed : null;
+                      const enough = o.fans_needed != null && o.fans_needed <= house.installed_fans;
+                      return (
+                        <tr key={i} style={{
+                          borderTop: "1px solid var(--surface-3)",
+                          background: pick && pick.ceiling_height_m === o.ceiling_height_m
+                            ? "rgba(56,189,248,0.10)"
+                            : enough && short ? "rgba(52,211,153,0.08)" : undefined,
+                        }}>
+                          <td style={{ padding: "6px 8px", fontWeight: i === 0 ? 700 : 400 }}>
+                            {o.ceiling_height_m.toFixed(1)} m{i === 0 ? " (now)" : ""}
+                          </td>
+                          <td style={{ padding: "6px 8px" }}>{o.cross_section_m2.toFixed(1)} m²</td>
+                          <td style={{ padding: "6px 8px", color: o.meets_tunnel_target ? "var(--ok)" : "var(--warn)" }}>
+                            {o.velocity_mps.toFixed(2)} m/s
+                          </td>
+                          <td style={{ padding: "6px 8px", fontWeight: 700 }}>{o.fans_needed ?? "—"}</td>
+                          <td style={{ padding: "6px 8px", color: saves && saves > 0 ? "var(--ok)" : undefined }}>
+                            {saves != null && saves > 0 ? `−${saves} fans` : "—"}
+                            {enough && short ? " ✓ within what you have" : ""}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div className="muted" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.5 }}>
+                  Fan counts are what it takes to reach the {result.target_airspeed_mps ?? 3} m/s
+                  tunnel target at each cross-section, using your fan&apos;s airflow at{" "}
+                  {house.static_pressure_pa} Pa. Rounded up — a fraction of a fan does not exist.
+                </div>
+              </div>
+            )}
+
+            <div className="tile" style={{ marginTop: 14 }}>
+              <div className="tile-title">Have you lowered the ceiling?</div>
+              <div className="muted" style={{ fontSize: 12.5, lineHeight: 1.55 }}>
+                If a false ceiling is already installed, enter its height. PCIS will size
+                ventilation from the real cross-section instead of the building&apos;s full height —
+                otherwise every recommendation is computed for a house bigger than the one
+                the air is actually moving through.
+              </div>
+              <div style={{ display: "flex", gap: 10, alignItems: "end", marginTop: 12, flexWrap: "wrap" }}>
+                <div>
+                  <label style={{ marginTop: 0 }}>Ceiling height (m)</label>
+                  <input
+                    type="number" step="0.1" min={1.2} max={house.height_m}
+                    value={whatIfCeiling ?? ""}
+                    placeholder={house.height_m.toFixed(1)}
+                    onChange={(e) => setWhatIfCeiling(e.target.value === "" ? null : +e.target.value)}
+                    style={{ width: 120 }}
+                  />
+                </div>
+                <button
+                  className="primary"
+                  style={{ maxWidth: 190, margin: 0 }}
+                  disabled={whatIfCeiling == null || whatIfCeiling >= house.height_m || whatIfCeiling < 1.2}
+                  onClick={async () => {
+                    if (whatIfCeiling == null || !house) return;
+                    try {
+                      // Persist as the house's height: it IS the height the air
+                      // moves through, and every downstream calculation (volume,
+                      // cross-section, envelope area) should use it.
+                      await updateHouse(house.id, {
+                        name: house.name, length_m: house.length_m, width_m: house.width_m,
+                        height_m: whatIfCeiling, insulation: house.insulation,
+                        fan_index: house.fan_index, installed_fans: house.installed_fans,
+                        static_pressure_pa: house.static_pressure_pa,
+                        has_cooling_pads: house.has_cooling_pads, heater_kw: house.heater_kw,
+                      });
+                      const hs = await getHouses(house.farm_id);
+                      setHouses(hs);
+                      setHouse(hs.find((h) => h.id === house.id) ?? house);
+                      setWhatIfCeiling(null);
+                      setModal(null);
+                    } catch (err: any) {
+                      setError(err?.message ?? "Could not save the ceiling height.");
+                    }
+                  }}
+                >
+                  Save as house height
+                </button>
+              </div>
+
+              {pick && (
+                <div style={{ marginTop: 14, padding: 12, borderRadius: 12, background: "rgba(56,189,248,0.08)" }}>
+                  <b>At {pick.ceiling_height_m.toFixed(1)} m:</b> cross-section{" "}
+                  {pick.cross_section_m2.toFixed(1)} m², air speed{" "}
+                  <b>{pick.velocity_mps.toFixed(2)} m/s</b>, needing{" "}
+                  <b>{pick.fans_needed ?? "—"} fans</b>
+                  {baseFans != null && pick.fans_needed != null && baseFans > pick.fans_needed
+                    ? ` — ${baseFans - pick.fans_needed} fewer than at ${house.height_m.toFixed(1)} m.`
+                    : "."}
+                  {pick.fans_needed != null && pick.fans_needed <= house.installed_fans && (
+                    <div style={{ color: "var(--ok)", marginTop: 6 }}>
+                      ✓ That brings the requirement within the {house.installed_fans} fans you already have.
+                    </div>
+                  )}
+                  {!pick.windchill_effective && (
+                    <div style={{ color: "var(--warn)", marginTop: 6 }}>
+                      ⚠ Below 2.54 m/s wind chill stops being effective [Aviagen], so the birds
+                      would feel little benefit at this height.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {geo?.note && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 14, lineHeight: 1.55 }}>
+                {geo.note}
+              </div>
+            )}
+          </Modal>
+        );
+      })()}
+
+      {modal === "comfort" && result && (
+        <Modal title="Bird Comfort" subtitle="How the score is built, and what it does not include" onClose={() => setModal(null)}>
+          <div className="stats">
+            <div className="stat"><div className="k">Comfort score</div><div className="v">{bs?.comfort_score ?? "—"}<span className="u">%</span></div><div className="u" style={{ fontSize: 10.5 }}>{bs?.comfort_label ?? ""}</div></div>
+            <div className="stat"><div className="k">THI</div><div className="v">{result.comfort.thi}</div><div className="u" style={{ fontSize: 10.5 }}>{result.comfort.thi_class.replace(/_/g, " ")}</div></div>
+            <div className="stat"><div className="k">Deviation from target</div><div className="v">{result.comfort.deviation_c > 0 ? "+" : ""}{result.comfort.deviation_c}<span className="u"> °C</span></div></div>
+            <div className="stat"><div className="k">Confidence</div><div className="v">{result.confidence_score}<span className="u">/100</span></div><div className="u" style={{ fontSize: 10.5 }}>metric score</div></div>
+          </div>
+
+          {sensorHistory.length >= 2 && (
+            <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 16, padding: 16, marginTop: 16 }}>
+              <div className="cap" style={{ marginBottom: 8 }}>Measured house conditions, last 48h</div>
+              <ClimateTrend points={downsample(
+                sensorHistory.filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null), 240
+              ).map((p) => ({
+                t_c: p.indoor_t_c as number, rh_pct: p.indoor_rh_pct as number,
+                label: new Date(p.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              }))} />
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
+                Comfort tracks these two lines. There is no separate comfort history yet —
+                the <Link href="/history" style={{ color: "var(--accent)" }}>Log</Link> records the
+                score each minute, so a comfort trend becomes available as that fills.
+              </div>
+            </div>
+          )}
+
+          <div className="tile" style={{ marginTop: 14 }}>
+            <div className="tile-title">How relevant is this number?</div>
+            <ul className="muted" style={{ fontSize: 12.5, lineHeight: 1.6, paddingLeft: 18 }}>
+              <li><b>What it is:</b> a composite of how far the house sits from the Aviagen target temperature for this bird weight, plus THI (Tao &amp; Xin 2003) — a poultry-specific heat index built from dry-bulb and wet-bulb temperature.</li>
+              <li><b>What it deliberately ignores:</b> air speed. Aviagen states felt temperature cannot be calculated, so running more fans does <em>not</em> move this score even though it genuinely helps the birds. That is why Feel Temperature is a separate card — read them together.</li>
+              <li><b>Where it weakens:</b> at {result.comfort.thi_class.includes("stress") ? "the current humidity" : "high humidity"} the target-temperature half of the score leans on a table tested only to 70% RH. THI is unaffected and is the more trustworthy half here.</li>
+              <li><b>It is not a bird observation.</b> It is a model of conditions. Panting birds, huddling, or uneven distribution beat any number on this screen.</li>
+            </ul>
+          </div>
+        </Modal>
+      )}
+
+      {modal === "feelTemp" && result && (
+        <Modal title="Feel Temperature" subtitle="What the birds experience, and how much to trust it" onClose={() => setModal(null)}>
+          <div className="stats">
+            <div className="stat"><div className="k">Felt by birds</div><div className="v">{result.effective_temp_c ?? "—"}<span className="u"> °C</span></div></div>
+            <div className="stat"><div className="k">House can hold</div><div className="v">{result.achievable_indoor_t_c ?? "—"}<span className="u"> °C</span></div></div>
+            <div className="stat"><div className="k">Aviagen target</div><div className="v">{result.comfort.target_temp_c.toFixed(1)}<span className="u"> °C</span></div></div>
+            <div className="stat"><div className="k">Air speed</div><div className="v">{result.air_speed_mps ?? "—"}<span className="u"> m/s</span></div></div>
+          </div>
+
+          {result.felt_band && (
+            <div className="tile" style={{ marginTop: 14 }}>
+              <div className="tile-title">Uncertainty band</div>
+              <div style={{ fontSize: 20, fontWeight: 800, marginTop: 6 }}>
+                {result.felt_band.cool_bound_c}° — {result.felt_band.warm_bound_c}°
+                <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}> (likely {result.felt_band.likely_c}°)</span>
+              </div>
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 8, lineHeight: 1.55 }}>
+                A range rather than a single figure, because this is the least verifiable
+                number in PCIS. You can measure temperature, humidity and air speed. You
+                cannot measure what a bird feels.
+                {result.felt_band.widened_by_humidity && " The band is wider than usual here because humidity above 70% impairs the evaporative cooling that wind chill depends on."}
+              </div>
+            </div>
+          )}
+
+          <div className="tile" style={{ marginTop: 14 }}>
+            <div className="tile-title">How it is derived</div>
+            <ul className="muted" style={{ fontSize: 12.5, lineHeight: 1.6, paddingLeft: 18 }}>
+              <li><b>Anchor:</b> Aviagen publishes one cited data point for wind-chill cooling at a reference air speed. That ceiling is never exceeded.</li>
+              <li><b>Age scaling:</b> a SKOV Viper Touch chill-factor curve scales the <em>response</em> to air speed by bird age — young chicks feel draught far more than finished birds. It scales below the cited ceiling, never past it.</li>
+              <li><b>Evaluated at the achievable temperature</b> ({result.achievable_indoor_t_c ?? "—"} °C), not the target. Ventilation cannot cool below the air it is fed, so evaluating at target would have reported a comfort the birds never get.</li>
+              <li><b>Why it still matters:</b> it is the only metric that responds to fan speed. Comfort and THI ignore air movement entirely, so without this card running more fans would look pointless.</li>
+            </ul>
+          </div>
+        </Modal>
+      )}
+
+      {modal === "heatStress" && result && (
+        <Modal title="Heat Stress" subtitle="How PCIS reached this conclusion" onClose={() => setModal(null)}>
+          <div className="stats">
+            <div className="stat"><div className="k">Risk</div><div className="v" style={{ color: RISK_COLOR[bs?.heat_stress_risk ?? "Low"] }}>{bs?.heat_stress_risk ?? "—"}</div></div>
+            <div className="stat"><div className="k">THI</div><div className="v">{result.comfort.thi}</div><div className="u" style={{ fontSize: 10.5 }}>{result.comfort.thi_class.replace(/_/g, " ")}</div></div>
+            <div className="stat"><div className="k">Panting</div><div className="v" style={{ fontSize: 17 }}>{bs?.panting_index ?? "—"}</div></div>
+            <div className="stat"><div className="k">Water intake</div><div className="v">{bs?.water_intake_multiplier ?? "—"}<span className="u">×</span></div><div className="u" style={{ fontSize: 10.5 }}>vs normal</div></div>
+          </div>
+
+          <div className="tile" style={{ marginTop: 14 }}>
+            <div className="tile-title">The chain that produced &ldquo;{bs?.heat_stress_risk ?? "—"}&rdquo;</div>
+            <ol className="muted" style={{ fontSize: 12.5, lineHeight: 1.7, paddingLeft: 18 }}>
+              <li>Measured indoor humidity <b>{inRh}%</b> and supply-air temperature give the wet-bulb temperature via Buck (1996) psychrometrics.</li>
+              <li>Dry bulb and wet bulb combine into <b>THI = {result.comfort.thi}</b> using the poultry-specific weighting 0.85·T<sub>db</sub> + 0.15·T<sub>wb</sub> [Tao &amp; Xin 2003] — not the human heat index, because birds pant rather than sweat.</li>
+              <li>THI falls in the <b>{result.comfort.thi_class.replace(/_/g, " ")}</b> band, which sets the risk level.</li>
+              <li>Air speed <b>{result.air_speed_mps ?? "—"} m/s</b> then adjusts the <em>panting</em> estimate and felt temperature, but by design does not move THI itself.</li>
+            </ol>
+            <div className="muted" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.55 }}>
+              THI is the most trustworthy heat signal PCIS has at your humidity: wet-bulb
+              temperature already encodes humidity properly and has no tested-range ceiling,
+              unlike the Aviagen target-temperature table.
+            </div>
+          </div>
+
+          {result.vpd_kpa != null && (
+            <div className="tile" style={{ marginTop: 14 }}>
+              <div className="tile-title">Cross-check: vapour pressure deficit</div>
+              <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{result.vpd_kpa} kPa</div>
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.55 }}>
+                Pure psychrometrics with no empirical table behind it, so it stays valid at
+                any humidity. Below ~0.3 kPa the air is close to saturated and birds struggle
+                to shed heat by panting at all — which is the mechanism THI is describing.
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
+
       {modal === "sensorHistory" && sensorHistory.length >= 2 && (() => {
         const pts = downsample(
           sensorHistory.filter((p) => p.indoor_t_c != null && p.indoor_rh_pct != null), 300)
@@ -1167,14 +1452,22 @@ export default function DashboardPage() {
   );
 }
 
-function Metric({ icon, label, value, sub, pct, color, spark }: {
+function Metric({ icon, label, value, sub, pct, color, spark, onClick }: {
   icon: string; label: string; value: string; sub: string; pct: number; color: string;
   spark?: (number | null)[];
+  /** When supplied the card becomes a button opening its explanation. */
+  onClick?: () => void;
 }) {
   return (
     <div
       className="metric"
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+      title={onClick ? `${label} — tap for detail` : undefined}
       style={{
+        cursor: onClick ? "pointer" : undefined,
         ["--mtint" as any]: `color-mix(in srgb, ${color} 16%, transparent)`,
         ["--mcol" as any]: `color-mix(in srgb, ${color} 28%, transparent)`,
       }}
@@ -1182,6 +1475,7 @@ function Metric({ icon, label, value, sub, pct, color, spark }: {
       <div className="metric-top">
         <span className="metric-icon">{icon}</span>
         <span className="metric-label">{label}</span>
+        {onClick && <span className="metric-more" aria-hidden>ⓘ</span>}
       </div>
       <div className="metric-val" style={{ color }}>{value}</div>
       <div className="metric-sub muted">{sub}</div>

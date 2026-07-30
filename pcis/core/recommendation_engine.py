@@ -51,6 +51,7 @@ from pcis.core import comfort_engine as ce
 from pcis.core import heat_moisture_balance as hmb
 from pcis.core import heating as htg
 from pcis.core import psychrometrics as psy
+from pcis.core import skov_reference as skov
 from pcis.core import target_airspeed as tas
 from pcis.core import ventilation_solver as vs
 from pcis.core import wind_chill as wc
@@ -224,6 +225,12 @@ class Recommendation:
     #: "ventilation cannot dehumidify" into something the operator can
     #: watch for on a forecast.
     outdoor_rh_for_drying_pct: float | None = None
+    #: Measured humidity vs what a SKOV Viper Touch expects at this age.
+    #: Context only -- it drives no calculation. Exists because "outside the
+    #: Aviagen tested range" does not tell an operator whether they are
+    #: marginally or wildly outside normal, and a working controller's own
+    #: limit does.
+    skov_humidity_benchmark: dict | None = None
     felt_temp_optimistic: bool = False
     min_vent_source: str = "aviagen"
     min_vent_per_bird_m3_h: float | None = None
@@ -316,6 +323,15 @@ def recommend(
 
     # --- Decide whether pads are needed ---------------------------------
     target_temp = ce.target_temperature(body_weight_kg, indoor_rh_pct)
+
+    # Commercial-controller humidity benchmark. Needs an age, so it is None
+    # when the caller did not supply one. Purely informational: it feeds no
+    # setpoint and changes no fan count.
+    _skov_rh = (
+        skov.compare_humidity(bird_age_days, indoor_rh_pct)
+        if bird_age_days is not None else None
+    )
+
     if ce.target_temperature_rh_is_clamped(indoor_rh_pct):
         confidence -= CONFIDENCE_DEDUCTION_RH_OUTSIDE_TABLE_RANGE
         explanation.append(
@@ -328,6 +344,20 @@ def recommend(
             "(more cooling needed), so treat pad/fan sizing here as a minimum, "
             "and lean on the THI reading (unaffected by this limitation) as the "
             "more trustworthy heat-stress signal at high humidity."
+            + (
+                # Turn the abstract "outside the tested range" into a number.
+                # SKOV's curve cannot extend Aviagen's table -- it answers a
+                # different question -- but a working controller's own limit
+                # tells the operator whether they are marginally or wildly
+                # outside normal, which the clamp warning alone does not.
+                f" For scale: a SKOV Viper Touch controller expects about "
+                f"{_skov_rh['expected_pct']:.0f}% RH at day {bird_age_days:g}, so "
+                f"{indoor_rh_pct:.0f}% is roughly {_skov_rh['excess_pct']:.0f} points "
+                "above what a commercial controller would accept at this age "
+                "[SKOV Viper Touch humidity curve]."
+                if _skov_rh is not None and _skov_rh["above_controller_limit"]
+                else ""
+            )
         )
     pads_needed = (
         cooling_pad is not None and outdoor_t_c > target_temp + PAD_ACTIVATION_MARGIN_C
@@ -743,6 +773,7 @@ def recommend(
         air_speed_agreement=air_speed_agreement,
         air_speed_divergence_pct=air_speed_divergence_pct,
         outdoor_rh_for_drying_pct=outdoor_rh_for_drying_pct,
+        skov_humidity_benchmark=_skov_rh,
         felt_temp_optimistic=(wc.windchill_estimate_is_optimistic(indoor_rh_pct) and effective_temp_c is not None),
         min_vent_source=min_vent_source,
         min_vent_per_bird_m3_h=round(min_vent_per_bird, 3),

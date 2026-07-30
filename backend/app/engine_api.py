@@ -128,6 +128,7 @@ def _rec_dict(rec: re.Recommendation) -> dict:
         "felt_comfort_index": round(rec.felt_comfort_index, 0) if rec.felt_comfort_index is not None else None,
         "moisture_control_limited": rec.moisture_control_limited,
         "outdoor_rh_for_drying_pct": rec.outdoor_rh_for_drying_pct,
+        "skov_humidity_benchmark": rec.skov_humidity_benchmark,
         "measured_air_speed_mps": rec.measured_air_speed_mps,
         "air_speed_agreement": rec.air_speed_agreement,
         "air_speed_divergence_pct": rec.air_speed_divergence_pct,
@@ -244,8 +245,14 @@ def recommend(payload) -> dict:
     )
     heights = [payload.height_m, payload.height_m - 0.3, payload.height_m - 0.5,
                payload.height_m - 0.8, payload.height_m - 1.0]
+    # Per-fan airflow at the design static pressure, so each ceiling option
+    # can report the fan count it would need -- the figure that decides
+    # whether a drop ceiling is worth building.
+    _fan = FAN_CATALOG[payload.fan_index]
+    _per_fan = _fan.airflow_at_static_pressure(payload.static_pressure_pa)
     table = tgeo.velocity_table(rec.delivered_airflow_m3_per_h or 0.0, payload.width_m,
-                                [h for h in heights if h >= 1.2])
+                                [h for h in heights if h >= 1.2],
+                                airflow_per_fan_m3_per_h=_per_fan)
     out["tunnel_geometry"] = {
         "current_velocity_mps": geo.current_velocity_mps,
         "target_velocity_mps": geo.target_velocity_mps,
@@ -259,6 +266,7 @@ def recommend(payload) -> dict:
         "options": [
             {"ceiling_height_m": o.ceiling_height_m, "cross_section_m2": o.cross_section_m2,
              "velocity_mps": o.velocity_mps, "velocity_fpm": o.velocity_fpm,
+             "fans_needed": o.fans_needed,
              "meets_tunnel_target": o.meets_tunnel_target,
              "windchill_effective": o.windchill_effective}
             for o in table
