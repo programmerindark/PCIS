@@ -21,7 +21,7 @@ from backend.app import ecowitt as ecowitt_client
 from backend.app import engine_api
 from backend.app.schemas import (
     EcowittCloudRequest, EcowittKeysRequest, EcowittLocalRequest,
-    MortalityRequest, RecommendRequest, ScheduleRequest,
+    GCPositionRequest, MortalityRequest, RecommendRequest, ScheduleRequest,
 )
 
 app = FastAPI(
@@ -95,6 +95,17 @@ def advise(req: RecommendRequest) -> dict:
 def mortality(req: MortalityRequest) -> dict:
     """Assess flock mortality vs the cited EU cumulative-mortality ceiling."""
     return engine_api.mortality(req)
+
+
+@app.post("/gc-position")
+def gc_position(req: GCPositionRequest) -> dict:
+    """Where the crop sits against the IB Group GC slab tables today.
+
+    A position, not a forecast. See pcis/core/gc_policy.py for why this is
+    the only endpoint permitted to return a money figure, and for what it
+    deliberately will not compute.
+    """
+    return engine_api.gc_position(req)
 
 
 @app.post("/sensor/ecowitt/cloud")

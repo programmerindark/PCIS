@@ -92,6 +92,16 @@ a thin removes 20–40% in a morning, so conflating them reports a
 catastrophic welfare breach on a routine day. This happened: a 6,940-bird
 lift was booked as deaths and showed 31.6% mortality.
 
+**Lifting is not mortality — including in the money path.** The same
+confusion reappeared in `gc_policy.project_in_crop`, which passed live
+birds in as birds *lifted*, so a routine thin read as ~27% mortality. That
+trips the 5% CBW rule, jumps cFCR past the 1.800 cliff, and prices the crop
+at **Rs 0 instead of Rs 426,448**. Thinned birds are delivered: add them
+back to both the count and the weight. A lift with no recorded weight
+cannot be priced at all — feed for those birds is already in the total
+while their kilograms are missing — so the engine returns
+`incomplete_reason` and the UI shows that instead of a number.
+
 **Evaluate at the ACHIEVABLE temperature, not the target.** Ventilation
 cannot cool below the air it is fed. `achievable_indoor_t_c =
 max(indoor_t_c, supply_t_c)`. Every bird-facing readout — felt temperature,
@@ -134,6 +144,15 @@ are the metrics to trust.
 - No projected profit or yield. PCIS models climate, not economics — a
   financial figure would be the only uncited number and the most likely to
   be believed uncritically.
+- **One exception, narrowly drawn:** `pcis/core/gc_policy.py` computes the
+  IB Group growing charge, because the slab tables are a *published
+  contract* and evaluating them is arithmetic over a stated rule, like the
+  EU mortality ceiling. It reports a POSITION (what today's entered numbers
+  are worth), never a forecast, and never nets income against farm costs.
+  It must not be extended to predict end-of-crop FCR or weight.
+- Entered values are labelled `✎ entered by hand` with their age. Feed and
+  sample weight are the only inputs no sensor produces, so they are the
+  only ones that can be silently stale while looking as live as the rest.
 
 ---
 

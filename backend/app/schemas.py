@@ -62,6 +62,30 @@ class MortalityRequest(BaseModel):
     depleted: int = Field(ge=0, default=0)
 
 
+class GCPositionRequest(BaseModel):
+    """Inputs the IB Group GC formula needs to price a crop.
+
+    Note what is NOT here: no feed price, no chick cost, no electricity.
+    This produces the contract's rearing charge, not a profit -- see the
+    header of pcis/core/gc_policy.py for why that boundary exists.
+    """
+    chicks_housed: int = Field(gt=0)
+    #: Birds still in the house RIGHT NOW.
+    birds_alive: int = Field(ge=0)
+    #: Sample-weighed average, kg. Entered by hand; nothing measures it.
+    avg_weight_kg: float = Field(gt=0, le=6)
+    #: Cumulative feed to date, kg, from the feed slips.
+    feed_consumed_kg: float = Field(ge=0)
+    shed_type: str = "other_ec"
+    #: Birds already thinned out. DELIVERED, not dead -- passing these as
+    #: mortality trips the 5% CBW rule and can price the crop at zero.
+    depleted_birds: int = Field(ge=0, default=0)
+    #: Weight of those thinned birds, kg. Required whenever
+    #: `depleted_birds` is non-zero; without it the engine declines to
+    #: report a rate rather than understating delivered kilograms.
+    depleted_weight_kg: float = Field(ge=0, default=0.0)
+
+
 class EcowittCloudRequest(BaseModel):
     """Credentials from the user's ecowitt.net account."""
     application_key: str = Field(min_length=8)

@@ -40,7 +40,7 @@ References
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # ---------------------------------------------------------------------------
 # Slab tables  [IBGC2025]
@@ -202,6 +202,12 @@ class GCAssessment:
     shed_type: str
     distance: SlabDistance
     notes: list[str]
+    #: Set when an input the contract formula REQUIRES is missing, so the
+    #: figures above cannot be stood behind. Callers must show this instead
+    #: of the money, never alongside it. Reporting a payout computed from
+    #: an incomplete crop is worse than reporting nothing, because it looks
+    #: exactly like a payout computed from a complete one.
+    incomplete_reason: str | None = None
 
 
 def assess(
@@ -280,19 +286,62 @@ def project_in_crop(
     avg_weight_kg: float,
     feed_consumed_kg: float,
     shed_type: str = "other_ec",
+    depleted_birds: int = 0,
+    depleted_weight_kg: float = 0.0,
 ) -> GCAssessment:
-    """Where the crop is heading if it were lifted today.
+    """Where the crop stands if the rest were lifted today.
 
     Deliberately NOT a forecast. It applies the contract formula to what
     has been measured so far, so the operator can see which slab they are
     currently sitting in and how much margin is left. It assumes nothing
     about the days remaining -- weight will rise and FCR will worsen, and
     both move cFCR, so treat this as a position, not a prediction.
+
+    Depletion handling is the dangerous part
+    ----------------------------------------
+    Birds already thinned out have been DELIVERED, not lost. An earlier
+    version of this function passed `birds_alive` straight in as
+    `birds_lifted`, which made `assess` compute mortality as
+    housed - alive -- counting every thinned bird as a death.
+
+    That is not a rounding error. A routine 6,940-bird thin out of ~26,000
+    reads as roughly 27% mortality, which is far past the 5% threshold, so
+    CBW switches to the 95%-of-housed denominator, cFCR jumps, and the crop
+    is priced in the wrong slab. The number would be wrong in the exact
+    place the operator is most likely to trust it. The same confusion
+    already produced a false welfare breach on the mortality page; here it
+    produces a false payout.
+
+    So thinned birds are added back to both the delivered count and the
+    delivered weight. Their weight is required, not optional -- see
+    `incomplete_reason`.
     """
-    return assess(
+    depleted_birds = max(0, depleted_birds)
+    delivered_birds = birds_alive + depleted_birds
+    total_weight = birds_alive * avg_weight_kg + max(0.0, depleted_weight_kg)
+
+    # A thin whose weight was never recorded cannot be priced. Feed for
+    # those birds is already in `feed_consumed_kg` while their kilograms
+    # are missing from the denominator, so FCR would be overstated and the
+    # crop would appear to sit in a worse slab than it does. Guessing the
+    # weight from a growth curve would be exactly the kind of invented
+    # number this codebase forbids, so PCIS says what it cannot do instead.
+    incomplete = None
+    if depleted_birds > 0 and depleted_weight_kg <= 0.0:
+        incomplete = (
+            f"{depleted_birds:,} birds have been lifted but no lift weight was "
+            f"recorded. FCR cannot be computed without those kilograms, so no GC "
+            f"rate is shown. Enter the weight from the lifting slip to see the "
+            f"position."
+        )
+
+    out = assess(
         chicks_housed=chicks_housed,
-        birds_lifted=birds_alive,
-        total_lifted_weight_kg=birds_alive * avg_weight_kg,
+        birds_lifted=delivered_birds,
+        total_lifted_weight_kg=total_weight,
         feed_consumed_kg=feed_consumed_kg,
         shed_type=shed_type,
     )
+    if incomplete is None:
+        return out
+    return replace(out, incomplete_reason=incomplete)

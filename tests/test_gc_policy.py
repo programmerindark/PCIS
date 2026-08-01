@@ -148,3 +148,113 @@ def test_in_crop_projection_is_a_position_not_a_forecast():
     p = gc.project_in_crop(23440, 16500, 2.5, 16500 * 2.5 * 1.55)
     assert p.cfcr > 0 and p.rate_per_kg >= 0
     assert p.avg_weight_kg == pytest.approx(2.5, abs=0.001)
+
+
+# ---------------------------------------------------------------------------
+# In-crop position: a thin must never be priced as mortality
+# ---------------------------------------------------------------------------
+#
+# These numbers are this farm's real shape: ~26,000 placed, a 6,640-bird
+# thin, 300 actual deaths. The same confusion booked as mortality once
+# already and reported a 31.6% welfare breach on a routine day.
+
+
+def test_thinned_birds_are_delivered_not_dead():
+    """A recorded thin must not move mortality or the CBW denominator."""
+    pos = gc.project_in_crop(
+        chicks_housed=26_000,
+        birds_alive=19_060,
+        avg_weight_kg=2.10,
+        feed_consumed_kg=88_000.0,
+        depleted_birds=6_640,
+        depleted_weight_kg=13_280.0,   # 2.00 kg on the lifting slip
+    )
+    # 26,000 - (19,060 + 6,640) = 300 dead.
+    assert pos.mortality_pct == pytest.approx(300 / 26_000 * 100, abs=1e-3)
+    assert pos.mortality_pct < gc.CBW_MORTALITY_THRESHOLD_PCT
+    assert pos.cbw_penalised is False
+    assert pos.incomplete_reason is None
+    assert pos.rate_per_kg > 0
+
+
+def test_treating_a_thin_as_mortality_prices_the_wrong_slab():
+    """The old behaviour must be demonstrably wrong, not merely different.
+
+    Passing only the live birds -- which is what this function used to do
+    -- reads the thin as deaths. This asserts that the mistake is
+    financially material, so nobody 'simplifies' the depletion arguments
+    back out of the signature.
+    """
+    correct = gc.project_in_crop(
+        chicks_housed=26_000, birds_alive=19_060, avg_weight_kg=2.10,
+        feed_consumed_kg=88_000.0,
+        depleted_birds=6_640, depleted_weight_kg=13_280.0,
+    )
+    as_if_dead = gc.project_in_crop(
+        chicks_housed=26_000, birds_alive=19_060, avg_weight_kg=2.10,
+        feed_consumed_kg=88_000.0,
+    )
+    assert as_if_dead.mortality_pct > 25.0          # absurd for a live crop
+    assert as_if_dead.cbw_penalised is True         # trips the 5% rule
+    assert as_if_dead.cfcr > correct.cfcr           # graded worse
+    assert as_if_dead.rate_per_kg < correct.rate_per_kg
+
+
+def test_lift_without_recorded_weight_refuses_to_price():
+    """Missing lift weight suppresses the money rather than guessing it."""
+    pos = gc.project_in_crop(
+        chicks_housed=26_000, birds_alive=19_060, avg_weight_kg=2.10,
+        feed_consumed_kg=88_000.0,
+        depleted_birds=6_640, depleted_weight_kg=0.0,
+    )
+    assert pos.incomplete_reason is not None
+    assert "lift weight" in pos.incomplete_reason
+    assert "6,640" in pos.incomplete_reason
+
+
+def test_no_depletion_still_works_unchanged():
+    """A crop with no thin behaves exactly as before the change."""
+    pos = gc.project_in_crop(
+        chicks_housed=26_000, birds_alive=25_400, avg_weight_kg=2.05,
+        feed_consumed_kg=80_000.0,
+    )
+    assert pos.incomplete_reason is None
+    assert pos.birds_lifted == 25_400
+
+
+# ---------------------------------------------------------------------------
+# The WIRED path, not just the core function
+# ---------------------------------------------------------------------------
+#
+# The engine matching the settlement proves the arithmetic. It does not
+# prove the dashboard shows it: the web layer unpacks a different shape
+# (birds ALIVE plus lifted birds and their weight, rather than one lifted
+# total), and that repacking is exactly where a thin gets misread as
+# mortality. This drives the real endpoint payload end to end.
+
+
+def test_endpoint_reproduces_the_settlement_to_the_rupee():
+    from backend.app import engine_api
+    from backend.app.schemas import GCPositionRequest
+
+    # Same lot, expressed as the dashboard would: nothing left in the house,
+    # the whole crop delivered as one lift with its weight recorded.
+    req = GCPositionRequest(
+        chicks_housed=21_432,
+        birds_alive=0,
+        avg_weight_kg=3.312,          # ignored when birds_alive is 0
+        feed_consumed_kg=107_880.0,
+        shed_type="other_ec",
+        depleted_birds=20_118,
+        depleted_weight_kg=66_624.350,
+    )
+    out = engine_api.gc_position(req)
+
+    assert out["incomplete_reason"] is None
+    assert out["fcr"] == pytest.approx(1.619, abs=0.001)
+    assert out["cbw_kg"] == pytest.approx(3.272, abs=0.001)
+    assert out["cfcr"] == pytest.approx(1.301, abs=0.001)
+    assert out["rate_per_kg"] == 13.50
+    assert out["rearing_charge"] == pytest.approx(899_428.73, abs=1)
+    # 6.131% — above the threshold, so the settlement's own CBW rule applied.
+    assert out["cbw_penalised"] is True

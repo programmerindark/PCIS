@@ -16,6 +16,7 @@ from pcis.core import bird_status as bs
 from pcis.core import comfort_engine as ce
 from pcis.core import digital_twin as twin
 from pcis.core import envelope_presets as ep
+from pcis.core import gc_policy as gcp
 from pcis.core import growth_curve as gc
 from pcis.core import psychrometrics as psy
 from pcis.core import heat_moisture_balance as hmb
@@ -325,6 +326,58 @@ def mortality(payload) -> dict:
         "daily_pct": a.daily_pct,
         "depleted": a.depleted,
         "note": a.note,
+    }
+
+
+def gc_position(payload) -> dict:
+    """Where the crop currently sits against the IB Group GC policy.
+
+    A POSITION, not a projection: the contract formula applied to what has
+    been measured and entered so far. It says nothing about the days
+    remaining, because weight will rise and FCR will worsen and both move
+    cFCR in opposite directions.
+
+    This is the one endpoint that returns money, and it is allowed to
+    because the slab tables are a published contract rather than a model
+    -- see the header of pcis.core.gc_policy. As everywhere else, the web
+    layer adds no engineering: it unpacks the payload and formats the
+    result.
+    """
+    a = gcp.project_in_crop(
+        chicks_housed=payload.chicks_housed,
+        birds_alive=payload.birds_alive,
+        avg_weight_kg=payload.avg_weight_kg,
+        feed_consumed_kg=payload.feed_consumed_kg,
+        shed_type=getattr(payload, "shed_type", "other_ec") or "other_ec",
+        depleted_birds=getattr(payload, "depleted_birds", 0) or 0,
+        depleted_weight_kg=getattr(payload, "depleted_weight_kg", 0.0) or 0.0,
+    )
+    d = a.distance
+    return {
+        # `incomplete_reason` is first because a caller that ignores it
+        # will render a payout PCIS has said it cannot stand behind.
+        "incomplete_reason": a.incomplete_reason,
+        "mortality_pct": a.mortality_pct,
+        "birds_delivered": a.birds_lifted,
+        "avg_weight_kg": a.avg_weight_kg,
+        "total_weight_kg": a.total_weight_kg,
+        "fcr": a.fcr,
+        "cbw_kg": a.cbw_kg,
+        "cfcr": a.cfcr,
+        "cbw_penalised": a.cbw_penalised,
+        "rate_per_kg": a.rate_per_kg,
+        "rearing_charge": a.rearing_charge,
+        "shed_type": a.shed_type,
+        "mortality_threshold_pct": gcp.CBW_MORTALITY_THRESHOLD_PCT,
+        "slab": {
+            "next_better_cfcr": d.next_better_cfcr,
+            "next_better_rate": d.next_better_rate,
+            "gain_per_kg": d.gain_per_kg,
+            "margin_to_worse_cfcr": d.margin_to_worse_cfcr,
+            "next_worse_rate": d.next_worse_rate,
+            "loss_per_kg": d.loss_per_kg,
+        },
+        "notes": a.notes,
     }
 
 

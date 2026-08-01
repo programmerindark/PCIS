@@ -16,6 +16,7 @@ import { recommend, schedule, advise, mortality, getGrowthCurve, readEcowittClou
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
 import AppShell from "@/components/AppShell";
 import ChickenLoader from "@/components/ChickenLoader";
+import GCCard from "@/components/GCCard";
 import Modal from "@/components/Modal";
 import { ClimateTrend, GrowthCurve, Sparkline } from "@/components/Charts";
 import LocationPicker from "@/components/LocationPicker";
@@ -893,6 +894,12 @@ export default function DashboardPage() {
                 </div>
               </div>
             </div>
+
+            {/* Placed directly under mortality and lifts because it consumes
+                both: mortality drives the CBW denominator above 5%, and a
+                lift adds delivered birds and kilograms. Seeing the payout
+                next to the figures that move it is the point. */}
+            <GCCard flockId={flock.id} birdsAlive={liveCount} />
           </div>
 
           {/* ============ RIGHT RAIL ============ */}

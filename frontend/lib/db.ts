@@ -315,3 +315,89 @@ export async function getSensorHistory(
   if (error) throw error;
   return (data ?? []) as SensorHistoryPoint[];
 }
+
+// ---------------------------------------------------------------------------
+// Growing-charge inputs
+// ---------------------------------------------------------------------------
+//
+// Everything else the dashboard shows is measured by a sensor once a
+// minute. These two numbers are typed in by a person, so `entered_at`
+// travels with them everywhere and the UI is expected to show it. A
+// fortnight-old weight rendered next to a live temperature looks exactly
+// as current as the temperature, and prices the crop wrongly without
+// looking wrong.
+
+export type CropGCInputs = {
+  flock_id: string;
+  chicks_housed: number;
+  feed_consumed_kg: number | null;
+  avg_weight_kg: number | null;
+  shed_type: string | null;
+  entered_at: string | null;
+  depleted_birds: number;
+  /** NULL when ANY lift is missing its weight — a partial sum understates
+   *  delivered kilograms, which is the same error as omitting them but
+   *  harder to spot. The engine refuses to price the crop in that case. */
+  depleted_weight_kg: number | null;
+};
+
+export async function getCropGCInputs(flockId: string): Promise<CropGCInputs | null> {
+  const { data, error } = await supabase
+    .from("crop_gc_inputs")
+    .select("*")
+    .eq("flock_id", flockId)
+    .maybeSingle();
+  // Migration not yet applied — the GC card simply does not render.
+  if (error) return null;
+  return (data as CropGCInputs) ?? null;
+}
+
+export async function saveCropInputs(
+  flockId: string,
+  feedConsumedKg: number,
+  avgWeightKg: number,
+  shedType: string,
+  note?: string
+): Promise<void> {
+  const { error } = await supabase.from("crop_inputs").insert({
+    flock_id: flockId,
+    feed_consumed_kg: feedConsumedKg,
+    avg_weight_kg: avgWeightKg,
+    shed_type: shedType,
+    note: note ?? null,
+  });
+  if (error) throw error;
+}
+
+/** Record the weight of a lift that was logged without one.
+ *
+ * Kept separate from logDepletion() because the bird count is known at the
+ * moment of catching while the weight comes back later on the slip. */
+export async function setDepletionWeight(
+  depletionId: number,
+  weightKg: number
+): Promise<void> {
+  const { error } = await supabase
+    .from("depletions")
+    .update({ weight_kg: weightKg })
+    .eq("id", depletionId);
+  if (error) throw error;
+}
+
+export type DepletionRow = {
+  id: number;
+  removed_on: string;
+  birds: number;
+  weight_kg: number | null;
+  note: string | null;
+};
+
+export async function getDepletions(flockId: string): Promise<DepletionRow[]> {
+  const { data, error } = await supabase
+    .from("depletions")
+    .select("id, removed_on, birds, weight_kg, note")
+    .eq("flock_id", flockId)
+    .order("removed_on", { ascending: false });
+  if (error) return [];
+  return (data ?? []) as DepletionRow[];
+}

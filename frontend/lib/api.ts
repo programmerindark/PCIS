@@ -93,3 +93,37 @@ export type EcowittDevice = { name: string; mac: string; type?: string; last_upd
 export function listEcowittDevices(input: { application_key: string; api_key: string }) {
   return post<{ devices: EcowittDevice[]; message: string }>("/sensor/ecowitt/devices", input);
 }
+
+export type GCPosition = {
+  /** When set, PCIS is declining to price the crop. Render THIS and not
+   *  the money — the other fields are computed from incomplete inputs. */
+  incomplete_reason: string | null;
+  mortality_pct: number;
+  birds_delivered: number;
+  avg_weight_kg: number;
+  total_weight_kg: number;
+  fcr: number;
+  cbw_kg: number;
+  cfcr: number;
+  cbw_penalised: boolean;
+  rate_per_kg: number;
+  rearing_charge: number;
+  shed_type: string;
+  mortality_threshold_pct: number;
+  slab: {
+    next_better_cfcr: number | null;
+    next_better_rate: number | null;
+    gain_per_kg: number | null;
+    margin_to_worse_cfcr: number | null;
+    next_worse_rate: number | null;
+    loss_per_kg: number | null;
+  };
+  notes: string[];
+};
+
+/** Where the crop sits against the IB Group slab tables today.
+ *
+ * A position, not a forecast — see pcis/core/gc_policy.py. */
+export function gcPosition(input: Record<string, unknown>) {
+  return post<GCPosition>("/gc-position", input);
+}
