@@ -116,7 +116,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: farmsErr.message }, { status: 500 });
   }
   if (!farms || farms.length === 0) {
-    return NextResponse.json({ ok: true, polled: 0, message: "No farms with Ecowitt keys configured." });
+    return NextResponse.json(
+      { ok: false, polled: 0, message: "No farms with Ecowitt keys configured." },
+      { status: 502 },
+    );
   }
 
   const results: Record<string, string> = {};
@@ -262,5 +265,28 @@ export async function GET(req: Request) {
     }
   }
 
-  return NextResponse.json({ ok: true, polled: farms.length, results });
+  // Status must reflect whether anything was actually WRITTEN.
+  //
+  // This route used to return 200 unconditionally, with per-farm outcomes
+  // buried in the body. An external monitor therefore saw an unbroken wall
+  // of green while the Ecowitt call failed for two and a half days and not
+  // one reading reached the database. A health endpoint that cannot report
+  // failure is not a health endpoint.
+  const outcomes = Object.values(results);
+  const wrote = outcomes.filter((r) => r.startsWith("logged")).length;
+  const skipped = outcomes.filter((r) => r.startsWith("skipped")).length;
+  const ok = wrote > 0 || skipped > 0;
+
+  return NextResponse.json(
+    {
+      ok,
+      polled: farms.length,
+      wrote,
+      skipped,
+      failed: outcomes.length - wrote - skipped,
+      results,
+    },
+    // 502: the route itself is healthy, but every upstream attempt failed.
+    { status: ok ? 200 : 502 },
+  );
 }

@@ -52,6 +52,25 @@ const SEV: Record<string, { c: string; bg: string; ico: string }> = {
 const SENSOR_STALE_MIN = 25;
 const SENSOR_DEAD_MIN = 45;
 
+/** Human-readable age of a reading.
+ *
+ * "3286m ago" is technically correct and completely unreadable — and it
+ * appears at exactly the moment the operator most needs to grasp how
+ * stale the data is. Past an hour, minutes stop being a unit anyone
+ * converts in their head. */
+function formatAge(min: number): string {
+  if (min < 1) return "just now";
+  if (min < 60) return `${Math.round(min)}m ago`;
+  const h = Math.floor(min / 60);
+  if (h < 24) {
+    const m = Math.round(min % 60);
+    return m ? `${h}h ${m}m ago` : `${h}h ago`;
+  }
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d}d ${rh}h ago` : `${d}d ago`;
+}
+
 const daysAgoISO = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
 
 function deriveAlerts(
@@ -65,13 +84,13 @@ function deriveAlerts(
     a.push({
       severity: "critical",
       title: "Sensor silent — check the house NOW",
-      message: `No reading for ${Math.round(sensorAgeMin)} minutes. A power cut takes the sensor and router down with the fans, so silence often means the ventilation has stopped. Everything below is from the last reading and may no longer be true.`,
+      message: `No reading for ${formatAge(sensorAgeMin).replace(" ago", "")}. A power cut takes the sensor and router down with the fans, so silence often means the ventilation has stopped. Everything below is from the last reading and may no longer be true.`,
     });
   } else if (sensorAgeMin != null && sensorAgeMin >= SENSOR_STALE_MIN) {
     a.push({
       severity: "warning",
       title: "Sensor reading is stale",
-      message: `Last reading ${Math.round(sensorAgeMin)} minutes ago. Readings below may be out of date.`,
+      message: `Last reading ${formatAge(sensorAgeMin)}. Readings below may be out of date.`,
     });
   }
   if (r.bird_status.heat_stress_risk === "High")
@@ -1023,7 +1042,7 @@ export default function DashboardPage() {
                                : sensorAgeMin >= SENSOR_STALE_MIN ? "var(--warn)"
                                : "var(--ok)",
                         }}>
-                          {sensorAgeMin < 1 ? "just now" : `${Math.round(sensorAgeMin)}m ago`}
+                          {formatAge(sensorAgeMin)}
                         </span>
                       )}
                     </div>
