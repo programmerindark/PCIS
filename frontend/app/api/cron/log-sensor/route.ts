@@ -29,6 +29,10 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+/** Bumped by hand when this route changes, so a stale deployment is
+ * visible in the scheduler's response body instead of being invisible. */
+const BUILD_MARKER = "2026-08-01-host-probe";
+
 const ECOWITT_CLOUD_URL = "https://api.ecowitt.net/api/v3/device/real_time";
 
 type FarmRow = {
@@ -280,7 +284,15 @@ export async function GET(req: Request) {
   // wrote nothing lives in the HTTP response body, which no one reads
   // until something has already been broken for days. One line here makes
   // the cause visible in the platform's own runtime logs.
-  console.log("[log-sensor]", JSON.stringify(results));
+  // Log WHICH Supabase project was written to, not just the outcome.
+  //
+  // Diagnosing this cost hours: the route reported "logged" every minute
+  // while the database we were inspecting received nothing, because the
+  // deployed environment pointed at a different project entirely. The
+  // host is public information (it ships in the client bundle), so naming
+  // it here leaks nothing and makes "writing to the wrong database"
+  // immediately visible instead of invisible.
+  console.log("[log-sensor]", new URL(url).host, JSON.stringify(results));
 
   const outcomes = Object.values(results);
   const wrote = outcomes.filter((r) => r.startsWith("logged")).length;
@@ -290,6 +302,17 @@ export async function GET(req: Request) {
   return NextResponse.json(
     {
       ok,
+      // `host` and `build` exist so the scheduler's own execution history
+      // answers two questions without anyone reading a platform log:
+      //   - which database did this write to?
+      //   - is this endpoint even running current code?
+      // The second is the sharper one. If a response comes back WITHOUT
+      // these fields, the URL being polled is serving an old build from a
+      // different deployment than the one being pushed to -- which looks
+      // identical to a working cron from outside, because it returns 200
+      // for writes landing somewhere nobody is looking.
+      host: new URL(url).host,
+      build: BUILD_MARKER,
       polled: farms.length,
       wrote,
       skipped,
