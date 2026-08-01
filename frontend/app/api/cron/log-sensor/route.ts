@@ -97,12 +97,16 @@ function pickConditions(data: any, indoorBlock: string) {
 
 export async function GET(req: Request) {
   const auth = req.headers.get("authorization");
-  if (process.env.CRON_SECRET && auth !== `Bearer ${process.env.CRON_SECRET}`) {
+  const cronSecret = (process.env.CRON_SECRET ?? "").trim();
+  if (cronSecret && auth?.trim() !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // .trim() is load-bearing: see lib/supabaseClient.ts. A newline pasted
+  // into an environment variable corrupts the service-role auth header
+  // without producing an obvious error anywhere.
+  const url = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").trim();
+  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
   if (!url || !serviceKey) {
     return NextResponse.json({ error: "Supabase server env not configured" }, { status: 500 });
   }
@@ -139,7 +143,7 @@ export async function GET(req: Request) {
       });
       const payload = await res.json();
       if (payload.code !== 0 && payload.code !== "0") {
-        results[farm.farm_id] = `ecowitt error: ${payload.msg ?? "rejected"}`;
+        results[farm.farm_id] = `ecowitt error ${payload.code}: ${payload.msg ?? "rejected"}`;
         continue;
       }
       const c = pickConditions(payload.data, farm.ecowitt_indoor_block || "outdoor");
@@ -188,7 +192,7 @@ export async function GET(req: Request) {
         continue;
       }
 
-      const apiBase = process.env.NEXT_PUBLIC_PCIS_API_URL;
+      const apiBase = (process.env.NEXT_PUBLIC_PCIS_API_URL ?? "").trim();
       if (!apiBase) {
         results[farm.farm_id] = "logged (engine URL not configured)";
         continue;
@@ -272,6 +276,12 @@ export async function GET(req: Request) {
   // of green while the Ecowitt call failed for two and a half days and not
   // one reading reached the database. A health endpoint that cannot report
   // failure is not a health endpoint.
+  // Log the per-farm outcome. Without this the only record of WHY a poll
+  // wrote nothing lives in the HTTP response body, which no one reads
+  // until something has already been broken for days. One line here makes
+  // the cause visible in the platform's own runtime logs.
+  console.log("[log-sensor]", JSON.stringify(results));
+
   const outcomes = Object.values(results);
   const wrote = outcomes.filter((r) => r.startsWith("logged")).length;
   const skipped = outcomes.filter((r) => r.startsWith("skipped")).length;

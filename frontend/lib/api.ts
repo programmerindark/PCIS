@@ -2,7 +2,11 @@
 // environment so it points at localhost in dev and the deployed API in
 // production. The engine is the ONLY source of climate numbers.
 
-const BASE = process.env.NEXT_PUBLIC_PCIS_API_URL ?? "http://127.0.0.1:8000";
+// Trimmed and de-slashed: pasted values carry stray whitespace, and a
+// trailing slash would produce "//recommend" on every call.
+const BASE = (process.env.NEXT_PUBLIC_PCIS_API_URL ?? "http://127.0.0.1:8000")
+  .trim()
+  .replace(/\/+$/, "");
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
