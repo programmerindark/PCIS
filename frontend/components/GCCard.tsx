@@ -28,13 +28,15 @@ import {
   type CropGCInputs, type DepletionRow,
 } from "@/lib/db";
 
+/** Only the columns this farm's contract can be on. The Parivartan
+ *  columns remain in the engine's slab table (the policy's own worked
+ *  illustration is a Parivartan case and validates the arithmetic) but
+ *  they are a different company's scheme, so offering them here would add
+ *  three ways to pick a wrong answer and none to pick a right one. */
 const SHED_TYPES: { value: string; label: string }[] = [
-  { value: "other_basic_ec", label: "Basic EC (other)" },
-  { value: "parivartan_basic_ec", label: "Basic EC (Parivartan)" },
-  { value: "other_semi_ec", label: "Semi EC (other)" },
-  { value: "parivartan_semi_ec", label: "Semi EC (Parivartan)" },
-  { value: "other_ec", label: "EC (other)" },
-  { value: "parivartan_ec", label: "EC (Parivartan)" },
+  { value: "other_basic_ec", label: "Basic EC" },
+  { value: "other_semi_ec", label: "Semi EC" },
+  { value: "other_ec", label: "EC" },
 ];
 
 /** "today" / "3 days ago" — staleness is the point, so it is never hidden. */

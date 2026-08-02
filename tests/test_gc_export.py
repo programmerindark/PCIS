@@ -140,3 +140,17 @@ def test_typescript_matches_python_across_the_grid(tmp_path):
         assert ts["rearingCharge"] == pytest.approx(py.rearing_charge, abs=1), label
         assert ts["cbwPenalised"] == py.cbw_penalised, label
         assert ts["mortalityPct"] == pytest.approx(py.mortality_pct, abs=1e-3), label
+
+
+def test_shortage_is_not_mortality_in_either_implementation():
+    """Lot B924B95625 carried 55 short birds.
+
+    Counting them as deaths gives 8.884% where the settlement says 8.635%.
+    Asserted here rather than only in test_gc_policy so the browser copy is
+    covered by the same guarantee.
+    """
+    a = gcp.assess(22_016, 20_060, 47_376.725, 77_280.0, shed_type="other_ec", shortage=55)
+    assert a.mortality_pct == pytest.approx(8.635, abs=0.001)
+
+    without = gcp.assess(22_016, 20_060, 47_376.725, 77_280.0, shed_type="other_ec")
+    assert without.mortality_pct == pytest.approx(8.884, abs=0.001)

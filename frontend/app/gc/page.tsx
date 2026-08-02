@@ -24,15 +24,19 @@
  */
 
 import { useMemo, useState } from "react";
-import { assess, SHED_TYPES, type ShedType } from "@/lib/gcPolicy";
+import {
+  assess, OFFERED_SHED_TYPES, policyCovers,
+  POLICY_ENTITY, POLICY_START_ISO, POLICY_END_ISO,
+  type ShedType,
+} from "@/lib/gcPolicy";
 
-const SHED_LABELS: Record<ShedType, string> = {
-  other_basic_ec: "Basic EC (other)",
-  parivartan_basic_ec: "Basic EC (Parivartan)",
-  other_semi_ec: "Semi EC (other)",
-  parivartan_semi_ec: "Semi EC (Parivartan)",
-  other_ec: "EC (other)",
-  parivartan_ec: "EC (Parivartan)",
+/** Labels for the shed types a grower under this contract can be on.
+ *  The Parivartan columns are a different company's scheme and are not
+ *  offered -- see OFFERED_SHED_TYPES. */
+const SHED_LABELS: Partial<Record<ShedType, string>> = {
+  other_basic_ec: "Basic EC",
+  other_semi_ec: "Semi EC",
+  other_ec: "EC",
 };
 
 /** Indian broiler feed is normally delivered in 50 kg bags. The bag size is
@@ -50,6 +54,9 @@ export default function GCCalculatorPage() {
   const [feed, setFeed] = useState("");
   const [feedUnit, setFeedUnit] = useState<"kg" | "bags">("kg");
   const [shed, setShed] = useState<ShedType>("other_ec");
+  // PLACEMENT, not lift: the other entity's crop was lifted inside this
+  // window but placed before it, so only the placement date catches it.
+  const [placementDate, setPlacementDate] = useState("");
 
   const n = (s: string) => {
     const v = Number(s.replace(/,/g, "").trim());
@@ -79,7 +86,25 @@ export default function GCCalculatorPage() {
         anywhere; the whole calculation runs on your phone.
       </p>
 
-      <div className="tile" style={{ marginTop: 18 }}>
+      {/* Scope, stated before any number rather than in small print at the
+          bottom. A crop from the other IB Group entity comes out wrong on
+          the CBW denominator and the rate table simultaneously, and reads
+          HIGH -- so this has to be the first thing read, not the last. */}
+      <div
+        style={{
+          marginTop: 16, padding: 12, borderRadius: 12,
+          border: "1px solid rgba(56,189,248,0.32)", background: "rgba(56,189,248,0.07)",
+          fontSize: 12, lineHeight: 1.55,
+        }}
+      >
+        <b>For {POLICY_ENTITY} crops only</b>, placements{" "}
+        {POLICY_START_ISO.split("-").reverse().join(".")} to{" "}
+        {POLICY_END_ISO.split("-").reverse().join(".")}. Other IB Group entities pay on a
+        different rate table and a different CBW rule — this will read too high for them.
+        Check the company name printed at the top of your slip.
+      </div>
+
+      <div className="tile" style={{ marginTop: 14 }}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <Field label="Chicks housed" value={housed} onChange={setHoused} />
           <Field label="Birds lifted" value={lifted} onChange={setLifted} />
@@ -107,14 +132,23 @@ export default function GCCalculatorPage() {
             </div>
           </div>
           <div>
+            <label style={{ marginTop: 0 }}>Placement date (optional)</label>
+            <input
+              type="date"
+              value={placementDate}
+              onChange={(e) => setPlacementDate(e.target.value)}
+              style={{ width: 165 }}
+            />
+          </div>
+          <div>
             <label style={{ marginTop: 0 }}>Shed type</label>
             <select
               value={shed}
               onChange={(e) => setShed(e.target.value as ShedType)}
               style={{ width: 210 }}
             >
-              {SHED_TYPES.map((s) => (
-                <option key={s} value={s}>{SHED_LABELS[s]}</option>
+              {OFFERED_SHED_TYPES.map((s) => (
+                <option key={s} value={s}>{SHED_LABELS[s] ?? s}</option>
               ))}
             </select>
           </div>
@@ -134,6 +168,22 @@ export default function GCCalculatorPage() {
         <div className="muted" style={{ fontSize: 13, marginTop: 18, lineHeight: 1.6 }}>
           Fill in all five figures to see the rate. They are all on your settlement
           slip, or on the lifting slip plus your feed record.
+        </div>
+      )}
+
+      {placementDate && !policyCovers(placementDate) && (
+        <div
+          style={{
+            marginTop: 16, padding: 13, borderRadius: 12,
+            border: "1px solid rgba(239,68,68,0.4)", background: "rgba(239,68,68,0.08)",
+            fontSize: 12.5, lineHeight: 1.55, color: "var(--ink)",
+          }}
+        >
+          <b>That placement date is outside this policy period.</b> Crops placed before{" "}
+          {POLICY_START_ISO.split("-").reverse().join(".")} were paid under earlier
+          contracts with different slab rates — on this farm&apos;s own older settlements
+          these tables overstate the rearing charge by Rs 1–2 lakh. The figure below does
+          not apply to that crop.
         </div>
       )}
 

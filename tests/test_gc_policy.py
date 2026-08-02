@@ -258,3 +258,63 @@ def test_endpoint_reproduces_the_settlement_to_the_rupee():
     assert out["rearing_charge"] == pytest.approx(899_428.73, abs=1)
     # 6.131% — above the threshold, so the settlement's own CBW rule applied.
     assert out["cbw_penalised"] is True
+
+
+# ---------------------------------------------------------------------------
+# Scope: these tables belong to ONE entity and ONE contract period
+# ---------------------------------------------------------------------------
+
+
+def test_policy_covers_the_verified_settlement():
+    """Lot B924B95626 was PLACED 22.12.2025, inside the period."""
+    assert gc.policy_covers("2025-12-22") is True
+
+
+def test_placement_date_rejects_the_other_entity_crop_but_lift_date_would_not():
+    """Lot B924B95625 (ABIS Exports) ran 08.10.2025 to 18.11.2025.
+
+    That crop was paid Rs 10.10/kg at cFCR 1.593 on a table these slabs do
+    not contain, so it must be rejected. Its LIFT date sits comfortably
+    inside the window -- checking that would wave it straight through. Only
+    the placement date catches it, which is why the policy is written
+    against placements and this function takes one.
+    """
+    assert gc.policy_covers("2025-10-08") is False   # placed: rejected
+    assert gc.policy_covers("2025-11-18") is True    # lifted: would pass
+
+
+def test_policy_boundaries_are_inclusive():
+    assert gc.policy_covers(gc.POLICY_START_ISO) is True
+    assert gc.policy_covers(gc.POLICY_END_ISO) is True
+    assert gc.policy_covers("2025-10-15") is False
+    assert gc.policy_covers("2026-10-16") is False
+
+
+def test_malformed_date_fails_closed():
+    """An unparseable date must not be treated as in-period."""
+    for bad in ["", "   ", "08.02.2026", "2026-2-8", "tomorrow", None]:
+        assert gc.policy_covers(bad) is False
+
+
+def test_the_exports_rate_is_not_in_these_tables():
+    """Rs 10.10/kg is absent from every shed column at every cFCR.
+
+    This is the evidence that the two entities use different tables rather
+    than a shifted version of one, and it is what justifies scoping the
+    calculator by company name rather than by date alone.
+    """
+    rates = {r for _u, d in gc._GC_SLABS for r in d.values()}  # noqa: SLF001
+    assert 10.10 not in rates
+
+
+def test_offered_shed_types_exclude_parivartan_but_tables_keep_it():
+    """The picker narrows; the cited table does not.
+
+    Deleting the Parivartan columns to tidy the dropdown would also delete
+    the only shed type the policy's own worked illustration uses, throwing
+    away one of two external validations to save three list entries.
+    """
+    assert all("parivartan" not in s for s in gc.OFFERED_SHED_TYPES)
+    assert set(gc.OFFERED_SHED_TYPES).issubset(set(gc.SHED_TYPES))
+    # still priced by the engine, still checked by the illustration tests
+    assert gc.gc_rate_per_kg(1.350, "parivartan_ec") == 14.75

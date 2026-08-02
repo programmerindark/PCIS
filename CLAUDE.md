@@ -102,6 +102,27 @@ cannot be priced at all — feed for those birds is already in the total
 while their kilograms are missing — so the engine returns
 `incomplete_reason` and the UI shows that instead of a number.
 
+**A settlement's CBW rule belongs to its CONTRACT PERIOD, not to poultry.**
+Nine settlements from this farm span four incentive schemes and two legal
+entities in two years. Lot B95625 (ABIS Exports, Oct 2025) divides CBW by
+chicks housed; lot B95626 (ABIS Foods, Dec 2025, five weeks later) divides
+by 0.95 x chicks. Each matches its own slip exactly. `gc_policy` implements
+the 16 Oct 2025 - 15 Oct 2026 policy ONLY: applying it to the older crops
+overstates the rearing charge by Rs 100k-210k. Never fit incentive formulae
+across settlements without first checking they share a scheme — only one
+crop is under the current one, so the incentives are not fittable at all.
+
+Scope is checked on the **PLACEMENT** date, not the lift. B95625 was
+*lifted* 18.11.2025 — inside the current window — but *placed* 08.10.2025,
+eight days before it opens. A lift-date check waves the wrong entity
+straight through; only `policy_covers(placement_date)` catches it.
+
+**Shortage is not mortality either.** Settlements carry short-supplied
+birds on their own line. Computing deaths as `housed - lifted` swallows
+them: lot B95625's 55 short birds read as 8.884% against the slip's 8.635%.
+Harmless there, but a crop at 4.9% true mortality would be pushed over the
+5% CBW threshold and penalised for birds it never received.
+
 **Evaluate at the ACHIEVABLE temperature, not the target.** Ventilation
 cannot cool below the air it is fed. `achievable_indoor_t_c =
 max(indoor_t_c, supply_t_c)`. Every bird-facing readout — felt temperature,

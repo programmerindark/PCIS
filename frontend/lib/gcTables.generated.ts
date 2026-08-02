@@ -19,6 +19,36 @@ export const SHED_TYPES = [
 
 export type ShedType = (typeof SHED_TYPES)[number];
 
+/** The shed types to OFFER in a picker.
+ *
+ *  Narrower than SHED_TYPES on purpose: the Parivartan columns belong to
+ *  a separate scheme run by another company. They stay in the slab table
+ *  because the policy's own worked illustration is a Parivartan case and
+ *  validates the arithmetic -- they are simply not choices this farm's
+ *  growers can be on. */
+export const OFFERED_SHED_TYPES: ShedType[] = [
+  "other_basic_ec",
+  "other_semi_ec",
+  "other_ec",
+];
+
+/** The ONE settlement family these tables reproduce.
+ *
+ *  A crop from the other IB Group entity is wrong on the CBW denominator
+ *  AND the rate table at the same time, and reads HIGH. Show this. */
+export const POLICY_ENTITY = "ABIS Foods and Proteins Private Limited";
+export const POLICY_START_ISO = "2025-10-16";
+export const POLICY_END_ISO = "2026-10-15";
+
+/** PLACEMENT date, not lift: lot B924B95625 (other entity, different rate
+ *  table) was LIFTED inside this window but PLACED eight days before it.
+ *  ISO strings sort chronologically, so a malformed date fails closed. */
+export function policyCovers(placementDateIso: string): boolean {
+  const d = (placementDateIso || '').trim().slice(0, 10);
+  if (d.length !== 10) return false;
+  return POLICY_START_ISO <= d && d <= POLICY_END_ISO;
+}
+
 /** Mortality above this switches the CBW denominator to 95% of chicks housed. */
 export const CBW_MORTALITY_THRESHOLD_PCT = 5.0;
 export const CBW_REFERENCE_KG = 2.0;

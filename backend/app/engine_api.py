@@ -351,6 +351,7 @@ def gc_position(payload) -> dict:
         shed_type=getattr(payload, "shed_type", "other_ec") or "other_ec",
         depleted_birds=getattr(payload, "depleted_birds", 0) or 0,
         depleted_weight_kg=getattr(payload, "depleted_weight_kg", 0.0) or 0.0,
+        shortage=getattr(payload, "shortage", 0) or 0,
     )
     d = a.distance
     return {

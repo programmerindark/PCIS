@@ -25,7 +25,10 @@ import {
 } from "./gcTables.generated";
 
 export type { ShedType };
-export { SHED_TYPES, CBW_MORTALITY_THRESHOLD_PCT } from "./gcTables.generated";
+export {
+  SHED_TYPES, OFFERED_SHED_TYPES, CBW_MORTALITY_THRESHOLD_PCT,
+  POLICY_ENTITY, POLICY_START_ISO, POLICY_END_ISO, policyCovers,
+} from "./gcTables.generated";
 
 export function gcRatePerKg(cfcr: number, shedType: ShedType): number {
   for (const [upper, rates] of GC_SLABS) {
@@ -144,11 +147,18 @@ export function assess(
   birdsLifted: number,
   totalLiftedWeightKg: number,
   feedConsumedKg: number,
-  shedType: ShedType
+  shedType: ShedType,
+  /** Birds the settlement records as SHORT -- neither delivered nor dead.
+   *  Keeping them out of mortality matters: on lot B924B95625 a 55-bird
+   *  shortage is the difference between 8.635% and 8.884%, and a crop at
+   *  4.9% true mortality would otherwise be pushed over the 5% threshold
+   *  and penalised for birds it never received. */
+  shortage: number = 0
 ): GCAssessment {
   chicksHoused = Math.max(1, chicksHoused);
+  shortage = Math.max(0, Math.min(shortage, chicksHoused));
   birdsLifted = Math.max(0, Math.min(birdsLifted, chicksHoused));
-  const dead = chicksHoused - birdsLifted;
+  const dead = Math.max(0, chicksHoused - birdsLifted - shortage);
   const mortalityPct = (100 * dead) / chicksHoused;
 
   const fcr = totalLiftedWeightKg > 0 ? feedConsumedKg / totalLiftedWeightKg : 0;

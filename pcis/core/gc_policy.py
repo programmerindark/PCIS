@@ -92,6 +92,71 @@ _GC_SLABS: list[tuple[float, dict[str, float]]] = [
     (float("inf"), {k: 0.00 for k in SHED_TYPES}),
 ]
 
+# ---------------------------------------------------------------------------
+# Scope  [IBGC2025]
+# ---------------------------------------------------------------------------
+#
+# These tables reproduce ONE settlement family. That is not pedantry: the
+# same farm's lot B924B95625 (ABIS Exports, Oct 2025) and lot B924B95626
+# (ABIS Foods and Proteins, Dec 2025) are five weeks apart and agree on
+# almost nothing that matters.
+#
+#   * CBW divides by chicks housed under Exports, by 0.95 x chicks under
+#     Foods and Proteins
+#   * Exports paid Rs 10.10/kg at cFCR 1.593 -- a rate that appears NOWHERE
+#     in the slab grid below, at any cFCR, in any of the six shed columns.
+#     It is a different table, not a shifted one.
+#   * Exports deducts production-cost and M recovery (Rs 33,724 on that
+#     lot); Foods and Proteins deducts medicine only (Rs 666)
+#
+# So a crop from the wrong entity does not come out slightly off -- it comes
+# out wrong on the denominator AND the rate simultaneously, and it reads
+# HIGH, which is the direction that gets a grower a phone call. Callers must
+# check `policy_covers()` before showing a figure to anyone.
+#: The shed types this farm's contract can actually be on.
+#:
+#: "Parivartan" is a separate scheme run by another company, so offering it
+#: in a calculator aimed at growers under THIS contract adds three ways to
+#: pick a wrong answer and no way to pick a right one -- and a wrong shed
+#: type is undetectable, worth up to 16%.
+#:
+#: The Parivartan columns stay in `_GC_SLABS` rather than being deleted,
+#: because the tables are a faithful reproduction of a published document
+#: and the policy's OWN worked illustration is a Parivartan EC case. That
+#: illustration is one of only two external validations this module has
+#: (the other is a real settlement). Deleting the rows to tidy the UI would
+#: throw away a check on the arithmetic to save a dropdown entry.
+OFFERED_SHED_TYPES: tuple[str, ...] = (
+    "other_basic_ec",
+    "other_semi_ec",
+    "other_ec",
+)
+
+POLICY_ENTITY = "ABIS Foods and Proteins Private Limited"
+POLICY_START_ISO = "2025-10-16"
+POLICY_END_ISO = "2026-10-15"
+
+
+def policy_covers(placement_date_iso: str) -> bool:
+    """Is a crop PLACED on this date priced by the tables in this module?
+
+    Placement, not lifting, and the distinction decides real cases. The
+    policy is stated as valid for placements in the window, and lot
+    B924B95625 -- the other entity, on a different rate table -- was lifted
+    18.11.2025, comfortably INSIDE the window. Checking the lift date would
+    wave it through. It was placed 08.10.2025, eight days before the window
+    opens, so checking placement rejects it correctly.
+
+    Compared as ISO strings, which sort chronologically, so no date parsing
+    is needed and a malformed input fails closed rather than silently
+    passing.
+    """
+    d = (placement_date_iso or "").strip()[:10]
+    if len(d) != 10:
+        return False
+    return POLICY_START_ISO <= d <= POLICY_END_ISO
+
+
 #: Mortality above this switches the CBW denominator  [IBGC2025].
 #:
 #: At or below 5%, CBW divides by birds actually lifted, so deaths do not
@@ -216,6 +281,7 @@ def assess(
     total_lifted_weight_kg: float,
     feed_consumed_kg: float,
     shed_type: str = "other_ec",
+    shortage: int = 0,
 ) -> GCAssessment:
     """Price a crop against the IB Group GC policy  [IBGC2025].
 
@@ -223,10 +289,20 @@ def assess(
     (rate, body-weight, brooding, loyalty) whose formulae are not stated in
     the policy document, so PCIS does not guess at them -- see the note
     attached to the result.
+
+    `shortage` is birds the settlement records as short, i.e. neither
+    delivered nor dead. Settlements carry it as its own line, and it must
+    stay out of mortality: on lot B924B95625 a 55-bird shortage is the
+    difference between the slip's 8.635% and the 8.884% you get from
+    (housed - lifted). Both sit above the 5% threshold there so nothing
+    moved, but a crop at 4.9% true mortality with a shortage would be
+    pushed over the line by this alone and have its CBW divided by 95% of
+    housed birds -- penalised for birds it never received.
     """
     chicks_housed = max(1, chicks_housed)
+    shortage = max(0, min(shortage, chicks_housed))
     birds_lifted = max(0, min(birds_lifted, chicks_housed))
-    dead = chicks_housed - birds_lifted
+    dead = max(0, chicks_housed - birds_lifted - shortage)
     mortality_pct = 100.0 * dead / chicks_housed
 
     fcr = feed_consumed_kg / total_lifted_weight_kg if total_lifted_weight_kg > 0 else 0.0
@@ -288,6 +364,7 @@ def project_in_crop(
     shed_type: str = "other_ec",
     depleted_birds: int = 0,
     depleted_weight_kg: float = 0.0,
+    shortage: int = 0,
 ) -> GCAssessment:
     """Where the crop stands if the rest were lifted today.
 
@@ -341,6 +418,7 @@ def project_in_crop(
         total_lifted_weight_kg=total_weight,
         feed_consumed_kg=feed_consumed_kg,
         shed_type=shed_type,
+        shortage=shortage,
     )
     if incomplete is None:
         return out

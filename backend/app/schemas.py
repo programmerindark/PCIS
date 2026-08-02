@@ -84,6 +84,10 @@ class GCPositionRequest(BaseModel):
     #: `depleted_birds` is non-zero; without it the engine declines to
     #: report a rate rather than understating delivered kilograms.
     depleted_weight_kg: float = Field(ge=0, default=0.0)
+    #: Birds recorded SHORT on the settlement -- neither delivered nor
+    #: dead. Kept out of mortality so a shortage cannot push a crop over
+    #: the 5% CBW threshold.
+    shortage: int = Field(ge=0, default=0)
 
 
 class EcowittCloudRequest(BaseModel):
