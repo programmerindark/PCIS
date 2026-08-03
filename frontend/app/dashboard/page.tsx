@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -11,6 +11,7 @@ import {
   getSensorHistory, type SensorHistoryPoint,
 } from "@/lib/db";
 import { getSensorAgeMinutes } from "@/lib/validation";
+import { getLatestRecommendation, getLatestReading } from "@/lib/db";
 import { downsample } from "@/lib/activity";
 import { recommend, schedule, advise, mortality, getGrowthCurve, readEcowittCloud, listEcowittDevices, type EcowittReading, type EcowittDevice } from "@/lib/api";
 import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather";
@@ -160,6 +161,17 @@ export default function DashboardPage() {
   const [advice, setAdvice] = useState<AdviseResponse | null>(null);
   const [adviceAck, setAdviceAck] = useState(false);
   const [computing, setComputing] = useState(false);
+  // Provenance of the numbers currently on screen.
+  //
+  // Since the cards seed from the last STORED recommendation so they paint
+  // instantly, a five-minute-old figure now looks identical to a live one.
+  // That is the same failure the "entered by hand" label exists to prevent,
+  // so the freshness travels with the numbers rather than being implied by
+  // the fact that a page is open.
+  const [resultAt, setResultAt] = useState<Date | null>(null);
+  const [resultLive, setResultLive] = useState(false);
+  // Ticks purely so the "x ago" label counts up between recomputes.
+  const [nowTick, setNowTick] = useState(0);
   const [error, setError] = useState("");
 
   const [flockCount, setFlockCount] = useState(20000);
@@ -196,6 +208,27 @@ export default function DashboardPage() {
   const [liveInput, setLiveInput] = useState<number | null>(null);
   const [units] = useUnits();
   const T = (c: number) => +cToDisplay(c, units).toFixed(1);
+  // Age of the numbers on screen, in the operator's terms.
+  //
+  // "live" is claimed only for a result this page computed itself within
+  // the last two minutes. Anything seeded from the database says so and
+  // gives the time, because a stored figure is a genuine measurement of an
+  // earlier moment -- useful, but not the same claim.
+  // nowTick is a real dependency: it is what makes the label count up
+  // between recomputes, so it belongs in the list rather than being
+  // smuggled into the arithmetic.
+  const freshness = useMemo(() => {
+    if (!resultAt) return { dot: "○", label: "waiting for the engine", color: "var(--ink-dim)" };
+    const mins = (Date.now() - resultAt.getTime()) / 60000;
+    // "live" is claimed ONLY for a result this page computed itself, and
+    // only while it is still current. Everything else states its age.
+    if (resultLive && mins < 2) return { dot: "●", label: "live", color: "var(--ok)" };
+    if (mins < 10) return { dot: "◷", label: `updated ${formatAge(mins)}`, color: "var(--ink-muted)" };
+    // Past ten minutes something is wrong: the engine should have been
+    // asked again on the minute timer, so say so rather than ageing quietly.
+    return { dot: "⚠", label: `last updated ${formatAge(mins)}`, color: "var(--warn)" };
+  }, [resultAt, resultLive, nowTick]);
+
   const ts = tempSuffix(units);
 
   // Lifted birds have left the house: they carry their heat, moisture and
@@ -232,30 +265,37 @@ export default function DashboardPage() {
         setFlock(await getActiveFlock(chosen.id).catch(() => null));
       }
       if (f.ecowitt_application_key && f.ecowitt_api_key && f.ecowitt_mac) {
-        const k = {
+        // Keys are still needed for the manual "Test read" button, but the
+        // page no longer calls Ecowitt to render. pg_cron logged a reading
+        // less than a minute ago; reading it back costs ~40 ms against the
+        // ~750 ms measured for Ecowitt's cloud, for a value that moves by a
+        // tenth of a degree between polls.
+        setEcoKeys({
           application_key: f.ecowitt_application_key,
           api_key: f.ecowitt_api_key,
           mac: f.ecowitt_mac,
           indoor_block: f.ecowitt_indoor_block || "outdoor",
-        };
-        setEcoKeys(k);
-        readEcowittCloud(k).then((r) => {
-          setSensor(r);
-          if (r.ok && r.indoor_rh_pct != null) setInRh(r.indoor_rh_pct);
-          // A two-module install measures ambient too. Measured beats
-          // forecast for conditions right now, so it overrides the
-          // Open-Meteo values that refreshWeather() filled in.
-          if (r.ok && r.outdoor_measured) {
-            if (r.outdoor_t_c != null) setOutT(r.outdoor_t_c);
-            if (r.outdoor_rh_pct != null) setOutRh(r.outdoor_rh_pct);
-            setWxSource("sensor");
-          }
-        }).catch(() => {});
+        });
       }
-      await refreshWeather(f);
+
+      // Paint from what is already known, THEN go and refresh it.
+      //
+      // Nothing below this point is allowed to hold up first paint. The
+      // weather fetch in particular used to be awaited, so an Open-Meteo
+      // round trip sat between the operator and a screen full of numbers
+      // the database could have answered instantly.
       setLoading(false);
+      void refreshWeather(f);
     })();
   }, [router, refreshWeather]);
+
+  // 15 s is a compromise: fast enough that "just now" does not linger
+  // while a figure quietly ages, cheap enough to leave running on a wall
+  // display all day. It re-renders text only -- no fetching.
+  useEffect(() => {
+    const t = setInterval(() => setNowTick((n) => n + 1), 15_000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (flock) getMortalitySummary(flock.id).then(setMort).catch(() => setMort({ cumulative_dead: 0, today_dead: 0, cumulative_depleted: 0 }));
@@ -267,6 +307,51 @@ export default function DashboardPage() {
   // Logged sensor history (from /api/cron/log-sensor, not the one-off
   // "Test read"). Empty on a fresh farm until the cron has run at least
   // once — that's expected, not a bug.
+  // Seed the cards from the last stored engine result, and the inputs from
+  // the last logged reading, before any network call to Render.
+  //
+  // This is what makes the numbers appear immediately. The stored
+  // recommendation is at most five minutes old (pg_cron pairs on that
+  // schedule) and is replaced by the live result as soon as compute()
+  // returns -- but the operator is looking at real figures the whole time
+  // instead of a spinner.
+  useEffect(() => {
+    if (!house) return;
+    let cancelled = false;
+    (async () => {
+      const [stored, reading] = await Promise.all([
+        getLatestRecommendation(house.id).catch(() => null),
+        getLatestReading(house.id).catch(() => null),
+      ]);
+      if (cancelled) return;
+
+      // Only seed if the live engine has not already answered, so a slow
+      // database read can never overwrite a fresher result.
+      if (stored?.payload) {
+        setResult((prev) => {
+          if (prev) return prev;                 // live result already won
+          setResultAt(new Date(stored.created_at));
+          setResultLive(false);
+          return stored.payload as RecommendResponse;
+        });
+      }
+      if (reading) {
+        // Set outright rather than only-if-empty: inRh starts at a
+        // placeholder 60, so a "keep what's there" guard would keep the
+        // placeholder forever and run the engine on a number nobody
+        // measured.
+        if (reading.indoor_rh_pct != null) setInRh(reading.indoor_rh_pct);
+        // Measured ambient beats forecast for conditions right now.
+        if (reading.outdoor_t_c != null && reading.outdoor_rh_pct != null) {
+          setOutT(reading.outdoor_t_c);
+          setOutRh(reading.outdoor_rh_pct);
+          setWxSource("sensor");
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [house]);
+
   useEffect(() => {
     if (!house) { setSensorHistory([]); return; }
     getSensorHistory(house.id, 48).then(setSensorHistory).catch(() => setSensorHistory([]));
@@ -301,6 +386,8 @@ export default function DashboardPage() {
     try {
       const res = (await recommend(base)) as RecommendResponse;
       setResult(res);
+      setResultAt(new Date());
+      setResultLive(true);
       saveRecommendation(house.id, flock.id, res);
       setAdviceAck(false);
       advise(base).then((a) => setAdvice(a as AdviseResponse)).catch(() => setAdvice(null));
@@ -322,17 +409,24 @@ export default function DashboardPage() {
   // hold that snapshot indefinitely, so the fan count your dad reads at
   // 4pm could have been computed at 9am. Re-reading here means the number
   // on screen is the number for right now.
+  //
+  // Reads the DATABASE, not Ecowitt. pg_cron polls the sensor once a minute
+  // from Postgres, so a second independent poll from every open browser tab
+  // would spend the farm's API quota to learn what the database already
+  // knows -- and it was measured at ~750 ms against ~40 ms. A wall display
+  // left open all day now costs one indexed lookup a minute.
   useEffect(() => {
-    if (!farm?.ecowitt_application_key || !ecoKeys.mac) return;
+    if (!house) return;
     const timer = setInterval(async () => {
       try {
-        const r = await readEcowittCloud(ecoKeys);
-        setSensor(r);
-        if (r.ok && r.indoor_rh_pct != null) setInRh(r.indoor_rh_pct);
-        if (r.ok && r.outdoor_measured) {
-          if (r.outdoor_t_c != null) setOutT(r.outdoor_t_c);
-          if (r.outdoor_rh_pct != null) setOutRh(r.outdoor_rh_pct);
-          setWxSource("sensor");
+        const r = await getLatestReading(house.id);
+        if (r) {
+          if (r.indoor_rh_pct != null) setInRh(r.indoor_rh_pct);
+          if (r.outdoor_t_c != null && r.outdoor_rh_pct != null) {
+            setOutT(r.outdoor_t_c);
+            setOutRh(r.outdoor_rh_pct);
+            setWxSource("sensor");
+          }
         }
       } catch {
         // A failed read must not stop the loop — the next minute may work,
@@ -342,7 +436,7 @@ export default function DashboardPage() {
       setAutoTick((t) => t + 1);
     }, 60_000);
     return () => clearInterval(timer);
-  }, [farm, ecoKeys]);
+  }, [house]);
 
   async function addFlock(e: React.FormEvent) {
     e.preventDefault();
@@ -750,6 +844,36 @@ export default function DashboardPage() {
               targetTempC={result?.comfort.target_temp_c ?? null}
             />
           </div>
+
+            {/* Freshness of everything below.
+                
+                One badge for the whole strip rather than one per tile: all
+                these figures come from the SAME engine run, so per-tile
+                stamps would repeat one fact nine times and imply the tiles
+                could disagree. What differs between them is CONFIDENCE, and
+                that is already shown per metric in the detail panels. */}
+            <div
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                marginTop: 14, fontSize: 11.5, color: "var(--ink-muted)",
+              }}
+              title={
+                resultAt
+                  ? `Engine last ran ${resultAt.toLocaleTimeString()}`
+                  : "No engine result yet"
+              }
+            >
+              <span style={{ color: freshness.color, fontSize: 13, lineHeight: 1 }}>
+                {freshness.dot}
+              </span>
+              <span style={{ color: freshness.color, fontWeight: 600 }}>{freshness.label}</span>
+              {computing && <span className="muted">· refreshing…</span>}
+              {sensorAgeMin != null && (
+                <span className="muted" style={{ marginLeft: "auto" }}>
+                  sensor {sensorAgeMin < 2 ? "live" : `${formatAge(sensorAgeMin)}`}
+                </span>
+              )}
+            </div>
 
             {/* stat strip */}
             <div className="stats">

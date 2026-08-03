@@ -45,11 +45,26 @@ calculation.
 
 ```
 Browser → Vercel (Next.js, frontend/) → Render (FastAPI, backend/) → pcis.core
-              ↓                                                       (all maths)
-         Supabase (auth, farms, houses, flocks, readings, recommendations)
-              ↑
-         cron-job.org (1-min poll) → /api/cron/log-sensor → Ecowitt cloud
+              ↓                            ↑                          (all maths)
+         Supabase ── pg_cron ──────────────┘
+              │        ├─ every 1 min: poll_ecowitt_readings() → Ecowitt cloud
+              │        └─ every 5 min: pair_recommendation()   → Render /recommend
+         (auth, farms, houses, flocks, readings, recommendations, sensor_poll_log)
 ```
+
+**Sensor capture lives in the DATABASE, not the web app.** It used to be
+cron-job.org → a Vercel route → Supabase → Ecowitt, and that chain returned
+HTTP 200 while writing nothing for two and a half days. Ecowitt was healthy
+the whole time — calling it directly from Postgres returned `code 0,
+success` — so the failure was inside the web layer, and no component
+recorded its own outcome anywhere durable, which is why it was invisible.
+
+Now `poll_ecowitt_readings()` runs in Postgres beside the data it writes,
+and **every run appends to `sensor_poll_log`** whether it works or not.
+Measurement capture (1 min) is deliberately separate from engine pairing
+(5 min): Render's free tier sleeps and can take tens of seconds to wake, and
+a missed minute of measurement is gone forever while a missed recommendation
+can be recomputed from the stored reading.
 
 - `pcis/core/` — the engine. Pure standard library. ~500 tests. **All
   climate maths lives here and nowhere else.**

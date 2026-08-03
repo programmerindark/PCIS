@@ -401,3 +401,83 @@ export async function getDepletions(flockId: string): Promise<DepletionRow[]> {
   if (error) return [];
   return (data ?? []) as DepletionRow[];
 }
+
+// ---------------------------------------------------------------------------
+// Fast paint: what the engine last said, straight from Postgres
+// ---------------------------------------------------------------------------
+//
+// The dashboard used to show nothing until Render answered. That was
+// reasonable when nothing else knew the answer, but pg_cron now stores a
+// full recommendation every five minutes, so the most recent one is sitting
+// in a table one indexed lookup away.
+//
+// Measured on this deployment: Supabase ~40 ms against Render ~200 ms warm,
+// and Render is only warm because the pairing job keeps it awake -- a user
+// arriving after a quiet spell would have waited on a cold start of tens of
+// seconds. Painting from the stored row first means the numbers are on
+// screen immediately and are at most five minutes old, with the live engine
+// result replacing them a moment later.
+//
+// The staleness is not hidden: the caller knows `created_at` and the live
+// indicator already reports sensor age separately.
+
+export type StoredRecommendation = {
+  created_at: string;
+  payload: Record<string, any> | null;
+  fans_on: number | null;
+  comfort_index: number | null;
+  heat_stress_risk: string | null;
+  air_speed_mps: number | null;
+  vpd_kpa: number | null;
+  confidence: number | null;
+};
+
+/** The newest stored recommendation that still carries its full payload.
+ *
+ * `log_recommendation_thin` writes the numeric row every tick but only
+ * stores the ~8 kB explanation when the DECISION changes, so the newest row
+ * is often payload-less. Asking for the newest row WITH a payload gives a
+ * complete card to paint rather than a half-populated one. */
+export async function getLatestRecommendation(
+  houseId: string
+): Promise<StoredRecommendation | null> {
+  const { data, error } = await supabase
+    .from("recommendations")
+    .select("created_at, payload, fans_on, comfort_index, heat_stress_risk, air_speed_mps, vpd_kpa, confidence")
+    .eq("house_id", houseId)
+    .not("payload", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data as StoredRecommendation;
+}
+
+/** The newest logged sensor reading.
+ *
+ * Replaces a live Ecowitt round trip on page load. The database copy is at
+ * most 60 seconds old because pg_cron polls every minute, and fetching it
+ * costs ~40 ms against ~750 ms measured for Ecowitt's cloud -- for a value
+ * that changes by a tenth of a degree between polls. */
+export type LatestReading = {
+  observed_at: string;
+  indoor_t_c: number | null;
+  indoor_rh_pct: number | null;
+  outdoor_t_c: number | null;
+  outdoor_rh_pct: number | null;
+  pressure_hpa: number | null;
+  measured_air_speed_mps: number | null;
+};
+
+export async function getLatestReading(houseId: string): Promise<LatestReading | null> {
+  const { data, error } = await supabase
+    .from("readings")
+    .select("observed_at, indoor_t_c, indoor_rh_pct, outdoor_t_c, outdoor_rh_pct, pressure_hpa, measured_air_speed_mps")
+    .eq("house_id", houseId)
+    .eq("source", "sensor")
+    .order("observed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data as LatestReading;
+}

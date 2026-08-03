@@ -4,15 +4,15 @@
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        }
       ]
-    }
-  ],
-  "crons": [
-    {
-      "path": "/api/cron/log-sensor",
-      "schedule": "0 3 * * *"
     }
   ]
 }
