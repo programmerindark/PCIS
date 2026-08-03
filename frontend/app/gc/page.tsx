@@ -27,6 +27,7 @@ import { useMemo, useState } from "react";
 import {
   assess, OFFERED_SHED_TYPES, policyCovers,
   POLICY_ENTITY, POLICY_START_ISO, POLICY_END_ISO,
+  policyStatus, daysUntilPolicyEnds,
   type ShedType,
 } from "@/lib/gcPolicy";
 
@@ -72,6 +73,11 @@ export default function GCCalculatorPage() {
     [housed, lifted, weight, feedKg, shed, ready]
   );
 
+  // Computed at render, never at build: a constant baked in at deploy
+  // time would leave the page permanently claiming the tables are current.
+  const status = policyStatus();
+  const daysLeft = daysUntilPolicyEnds();
+
   const impliedAvg =
     n(lifted) > 0 && n(weight) > 0 ? n(weight) / n(lifted) : null;
 
@@ -103,6 +109,38 @@ export default function GCCalculatorPage() {
         different rate table and a different CBW rule — this will read too high for them.
         Check the company name printed at the top of your slip.
       </div>
+
+      {/* The tables have a stated end date and the previous transition
+          changed the rates COMPLETELY -- a renewal cannot be assumed to
+          continue them. So the page says when it is about to go stale
+          rather than quietly carrying on quoting expired numbers. */}
+      {status !== "current" && (
+        <div
+          style={{
+            marginTop: 10, padding: 12, borderRadius: 12,
+            border: `1px solid ${status === "expired" ? "rgba(239,68,68,0.45)" : "rgba(251,146,60,0.4)"}`,
+            background: status === "expired" ? "rgba(239,68,68,0.09)" : "rgba(251,146,60,0.08)",
+            fontSize: 12, lineHeight: 1.55,
+          }}
+        >
+          {status === "expired" ? (
+            <>
+              <b>These rates have expired.</b> The policy period ended{" "}
+              {POLICY_END_ISO.split("-").reverse().join(".")}. When this contract last
+              changed hands the entire rate table changed with it, so do not assume these
+              slabs carried over — get the current policy document before relying on any
+              figure below.
+            </>
+          ) : (
+            <>
+              <b>This policy period ends in {daysLeft} days</b> (
+              {POLICY_END_ISO.split("-").reverse().join(".")}). Crops placed after that are
+              priced by a document nobody has yet. Worth asking your field officer for the
+              renewal now — last time, every rate changed.
+            </>
+          )}
+        </div>
+      )}
 
       <div className="tile" style={{ marginTop: 14 }}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>

@@ -318,3 +318,25 @@ def test_offered_shed_types_exclude_parivartan_but_tables_keep_it():
     assert set(gc.OFFERED_SHED_TYPES).issubset(set(gc.SHED_TYPES))
     # still priced by the engine, still checked by the illustration tests
     assert gc.gc_rate_per_kg(1.350, "parivartan_ec") == 14.75
+
+
+# --- the tables have a shelf life ------------------------------------------
+
+
+def test_policy_status_tracks_the_window():
+    assert gc.policy_status("2026-06-01") == "current"
+    assert gc.policy_status("2026-10-15") == "expiring"   # last valid day
+    assert gc.policy_status("2026-10-16") == "expired"
+
+
+def test_policy_status_warns_before_it_lapses():
+    """A crop placed near the end settles under these tables; the NEXT one
+    does not. The warning has to arrive before the renewal is needed."""
+    assert gc.policy_status("2026-08-03") == "expiring"
+    assert gc.policy_status("2026-01-01") == "current"
+
+
+def test_unparseable_today_is_treated_as_expired():
+    """Fail loud. Claiming currency on a bad date is the dangerous default."""
+    for bad in ["", "not-a-date", "15/10/2026", None]:
+        assert gc.policy_status(bad) == "expired"

@@ -49,6 +49,29 @@ export function policyCovers(placementDateIso: string): boolean {
   return POLICY_START_ISO <= d && d <= POLICY_END_ISO;
 }
 
+/** Days before the window closes at which to start warning.
+ *
+ *  The rates changed COMPLETELY at the last transition, so a renewal must
+ *  not be assumed to continue these tables. */
+export const POLICY_EXPIRY_WARNING_DAYS = 90;
+
+export type PolicyStatus = 'current' | 'expiring' | 'expired';
+
+/** Evaluated against a date the caller supplies, so a build-time constant
+ *  can never freeze the tool into believing it is still current. */
+export function policyStatus(today: Date = new Date()): PolicyStatus {
+  const end = new Date(POLICY_END_ISO + 'T00:00:00');
+  const days = Math.floor((end.getTime() - today.getTime()) / 86400000);
+  if (days < 0) return 'expired';
+  if (days <= POLICY_EXPIRY_WARNING_DAYS) return 'expiring';
+  return 'current';
+}
+
+export function daysUntilPolicyEnds(today: Date = new Date()): number {
+  const end = new Date(POLICY_END_ISO + 'T00:00:00');
+  return Math.floor((end.getTime() - today.getTime()) / 86400000);
+}
+
 /** Mortality above this switches the CBW denominator to 95% of chicks housed. */
 export const CBW_MORTALITY_THRESHOLD_PCT = 5.0;
 export const CBW_REFERENCE_KG = 2.0;

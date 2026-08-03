@@ -157,6 +157,39 @@ def policy_covers(placement_date_iso: str) -> bool:
     return POLICY_START_ISO <= d <= POLICY_END_ISO
 
 
+#: How long before the window closes to start saying so.
+#:
+#: A crop takes roughly six weeks from placement to lift, so a grower
+#: placing birds inside the last stretch of the window will be settled
+#: under it, but the NEXT crop will not be. The warning exists to get the
+#: replacement document in hand before the tables silently go stale --
+#: the rates changed entirely at the last transition, so assuming
+#: continuity across a renewal is exactly the mistake to avoid.
+POLICY_EXPIRY_WARNING_DAYS = 90
+
+
+def policy_status(today_iso: str) -> str:
+    """'current' | 'expiring' | 'expired' for the tables in this module.
+
+    Evaluated against a date the CALLER supplies rather than a captured
+    "now", so the answer is testable and so a build-time constant can never
+    freeze the tool into permanently believing it is current.
+    """
+    from datetime import date
+
+    try:
+        today = date.fromisoformat((today_iso or "").strip()[:10])
+        end = date.fromisoformat(POLICY_END_ISO)
+    except ValueError:
+        # Fail loud rather than silently claiming currency.
+        return "expired"
+    if today > end:
+        return "expired"
+    if (end - today).days <= POLICY_EXPIRY_WARNING_DAYS:
+        return "expiring"
+    return "current"
+
+
 #: Mortality above this switches the CBW denominator  [IBGC2025].
 #:
 #: At or below 5%, CBW divides by birds actually lifted, so deaths do not

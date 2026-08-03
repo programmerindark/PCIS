@@ -28,6 +28,7 @@ export type { ShedType };
 export {
   SHED_TYPES, OFFERED_SHED_TYPES, CBW_MORTALITY_THRESHOLD_PCT,
   POLICY_ENTITY, POLICY_START_ISO, POLICY_END_ISO, policyCovers,
+  policyStatus, daysUntilPolicyEnds, type PolicyStatus,
 } from "./gcTables.generated";
 
 export function gcRatePerKg(cfcr: number, shedType: ShedType): number {
