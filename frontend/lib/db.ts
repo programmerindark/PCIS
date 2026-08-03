@@ -481,3 +481,42 @@ export async function getLatestReading(houseId: string): Promise<LatestReading |
   if (error || !data) return null;
   return data as LatestReading;
 }
+
+/** Every feed/weight entry for this crop, oldest first.
+ *
+ * The basis for the in-crop payout trend. Deliberately NOT a comparison
+ * across crops: this farm's nine settlements span four incentive schemes
+ * and two legal entities, so a line joining their payouts would imply a
+ * trend where there is only a change of contract. Within one crop, every
+ * point is priced by the same published table, so the movement is real.
+ */
+export type CropInputRow = {
+  entered_at: string;
+  feed_consumed_kg: number;
+  avg_weight_kg: number;
+  shed_type: string;
+};
+
+export async function getCropInputHistory(flockId: string): Promise<CropInputRow[]> {
+  const { data, error } = await supabase
+    .from("crop_inputs")
+    .select("entered_at, feed_consumed_kg, avg_weight_kg, shed_type")
+    .eq("flock_id", flockId)
+    .order("entered_at", { ascending: true });
+  if (error) return [];
+  return (data ?? []) as CropInputRow[];
+}
+
+/** Daily mortality for this crop, oldest first — the other half of the
+ *  merged card, and the figure that moves the CBW denominator. */
+export type MortalityRow = { recorded_on: string; dead: number };
+
+export async function getMortalityHistory(flockId: string): Promise<MortalityRow[]> {
+  const { data, error } = await supabase
+    .from("mortality")
+    .select("recorded_on, dead")
+    .eq("flock_id", flockId)
+    .order("recorded_on", { ascending: true });
+  if (error) return [];
+  return (data ?? []) as MortalityRow[];
+}

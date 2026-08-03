@@ -18,6 +18,7 @@ import { getCurrentWeather, getTodayProfile, type WxPoint } from "@/lib/weather"
 import AppShell from "@/components/AppShell";
 import ChickenLoader from "@/components/ChickenLoader";
 import GCCard from "@/components/GCCard";
+import CropValueCard, { CropValueDetail } from "@/components/CropValueCard";
 import Modal from "@/components/Modal";
 import { ClimateTrend, GrowthCurve, Sparkline } from "@/components/Charts";
 import LocationPicker from "@/components/LocationPicker";
@@ -194,7 +195,7 @@ export default function DashboardPage() {
   const [showConditions, setShowConditions] = useState(false);
   const [modal, setModal] = useState<
     null | "climate" | "growth" | "plan" | "sensorHistory"
-    | "comfort" | "feelTemp" | "heatStress" | "fans"
+    | "comfort" | "feelTemp" | "heatStress" | "fans" | "cropValue"
   >(null);
   // What-if ceiling height for the fan-shortfall panel, in metres.
   const [whatIfCeiling, setWhatIfCeiling] = useState<number | null>(null);
@@ -540,6 +541,17 @@ export default function DashboardPage() {
   if (loading) return <div className="auth-wrap"><ChickenLoader /></div>;
 
   const bs = result?.bird_status;
+
+  // The lower of the felt and dry-bulb comfort scores -- see the comment
+  // on the Bird Comfort card for why the pessimistic one is the honest one.
+  const comfortHeadline = (() => {
+    const felt = result?.felt_comfort_index;
+    const dry = bs?.comfort_score;
+    if (felt == null && dry == null) return null;
+    if (felt == null) return dry!;
+    if (dry == null) return felt;
+    return Math.min(felt, dry);
+  })();
   const hmx = result?.house_metrics;
   const series = sched?.series ?? [];
   const ph = result?.predicted_humidity ?? null;
@@ -834,12 +846,33 @@ export default function DashboardPage() {
             <div>
             {/* metric cards */}
             <div className="metrics">
+              {/* Headline the LOWER of the two comfort figures.
+
+                  There are two, and they can disagree violently. The
+                  felt-temperature score asks "how warm does moving air make
+                  this bird feel"; the dry-bulb score asks "how far is this
+                  house from the target for its age". At 26 C and 96% RH
+                  they read 100% and 10% respectively — and the card was
+                  showing the 100%.
+
+                  The optimistic one is also the least trustworthy: felt
+                  temperature is the weakest link in the whole stack (nothing
+                  in the sensor set can verify it), and wind chill says
+                  nothing about whether a bird can actually shed heat. At
+                  96% RH it cannot — panting moves no moisture into air that
+                  is already saturated. So a 100% headline beside a THI of
+                  "heat stress" invites exactly the wrong decision, which is
+                  to do nothing.
+
+                  Showing the worse of the two is not pessimism, it is
+                  refusing to let the reader act on the number PCIS is least
+                  able to stand behind. Both are still shown. */}
               <Metric icon="💚" label="Bird Comfort" color="var(--green)"
-                value={result?.felt_comfort_index != null ? `${result.felt_comfort_index}%` : (bs ? `${bs.comfort_score}%` : "—")}
+                value={comfortHeadline != null ? `${comfortHeadline}%` : "—"}
                 sub={result?.felt_comfort_index != null
-                  ? `as felt · ${bs?.comfort_score ?? "—"}% dry-bulb`
+                  ? `${bs?.comfort_score ?? "—"}% dry-bulb · ${result.felt_comfort_index}% as felt`
                   : (bs?.comfort_label ?? "")}
-                pct={result?.felt_comfort_index ?? bs?.comfort_score ?? 0} onClick={() => setModal("comfort")} />
+                pct={comfortHeadline ?? 0} onClick={() => setModal("comfort")} />
               <Metric icon="🌡" label="Feel Temperature" color="var(--blue)"
                 value={result?.effective_temp_c != null ? `${result.effective_temp_c.toFixed(1)}°` : "—"}
                 sub={result && result.effective_temp_c != null && result.achievable_indoor_t_c != null
@@ -1034,6 +1067,24 @@ export default function DashboardPage() {
                 both: mortality drives the CBW denominator above 5%, and a
                 lift adds delivered birds and kilograms. Seeing the payout
                 next to the figures that move it is the point. */}
+            {/* Mortality and expected payout in ONE block.
+                
+                They were two cards, which hid the mechanism that ties them:
+                past 5% mortality the CBW denominator switches and deaths
+                start moving the money, not just the welfare figure. Side by
+                side, the connection is visible without being explained. */}
+            <CropValueCard
+              flockId={flock.id}
+              chicksHoused={flock.bird_count}
+              birdsAlive={liveCount}
+              cumulativeDead={mort.cumulative_dead}
+              ageDays={age}
+              ceilingPct={mortAssess?.acceptable_pct ?? null}
+              onOpen={() => setModal("cropValue")}
+            />
+
+            {/* The feed/weight entry form still lives here, below the
+                summary that consumes it. */}
             <GCCard flockId={flock.id} birdsAlive={liveCount} />
           </div>
 
@@ -1423,6 +1474,22 @@ export default function DashboardPage() {
           </Modal>
         );
       })()}
+
+      {modal === "cropValue" && flock && (
+        <Modal
+          title="Crop value"
+          subtitle="Mortality, expected payout, and how it has moved across this crop"
+          onClose={() => setModal(null)}
+        >
+          <CropValueDetail
+            flockId={flock.id}
+            chicksHoused={flock.bird_count}
+            birdsAlive={liveCount}
+            depletedBirds={mort.cumulative_depleted ?? 0}
+            depletedWeightKg={null}
+          />
+        </Modal>
+      )}
 
       {modal === "comfort" && result && (
         <Modal title="Bird Comfort" subtitle="How the score is built, and what it does not include" onClose={() => setModal(null)}>
