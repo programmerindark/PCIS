@@ -120,6 +120,22 @@ export function slabDistance(cfcr: number, shedType: ShedType): SlabDistance {
   };
 }
 
+/** True for the note that merely restates a rendered margin panel.
+ *
+ * The engine emits the slab-margin sentence because a caller with no room
+ * for a panel still needs the warning. A caller that HAS drawn the panel
+ * would print the same numbers twice in a row, which on a phone is a
+ * screenful of duplication between the reader and the notes that are not
+ * duplicated.
+ *
+ * The match lives here rather than in the page so the string and the code
+ * that writes it stay in the same file -- put it in the UI and the two
+ * drift apart the first time the wording changes.
+ */
+export function isMarginNote(note: string): boolean {
+  return note.includes("of cFCR margin before the rate drops");
+}
+
 export type GCAssessment = {
   mortalityPct: number;
   birdsLifted: number;

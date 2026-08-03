@@ -25,7 +25,7 @@
 
 import { useMemo, useState } from "react";
 import {
-  assess, OFFERED_SHED_TYPES, policyCovers,
+  assess, OFFERED_SHED_TYPES, policyCovers, isMarginNote,
   POLICY_ENTITY, POLICY_START_ISO, POLICY_END_ISO,
   policyStatus, daysUntilPolicyEnds,
   type ShedType,
@@ -77,6 +77,13 @@ export default function GCCalculatorPage() {
   // time would leave the page permanently claiming the tables are current.
   const status = policyStatus();
   const daysLeft = daysUntilPolicyEnds();
+
+  // Mirrors the condition the panel is drawn under. Kept as a separate
+  // boolean only for the note filter -- TypeScript cannot narrow
+  // `lossPerKg` through it, so the JSX repeats the explicit check rather
+  // than relying on this. If one changes, change both.
+  const marginPanelShown =
+    !!result && result.distance.marginToWorseCfcr !== null && !!result.distance.lossPerKg;
 
   const impliedAvg =
     n(lifted) > 0 && n(weight) > 0 ? n(weight) / n(lifted) : null;
@@ -238,6 +245,17 @@ export default function GCCalculatorPage() {
                 {rupees(result.rearingCharge)} on{" "}
                 {result.totalWeightKg.toLocaleString("en-IN")} kg
               </div>
+              {/* Provenance, because this result gets screenshotted.
+                  
+                  Every figure here is arithmetic over five numbers the
+                  reader typed moments ago -- obvious while you are sitting
+                  in front of the form, and completely lost the instant the
+                  screenshot is forwarded to someone who did not type them.
+                  Given this page is meant to travel by WhatsApp, the label
+                  has to survive the journey with the number. */}
+              <div style={{ fontSize: 11, color: "var(--ink-dim)", marginTop: 6, lineHeight: 1.5 }}>
+                ✎ computed from the figures entered above · IB Group slab table
+              </div>
             </div>
             <div
               style={{
@@ -293,8 +311,15 @@ export default function GCCalculatorPage() {
             </div>
           ) : null}
 
+          {/* The margin panel above already states this crop's slab
+              distance in rupees, so the engine's equivalent sentence would
+              be the same numbers twice running. Dropped only when the
+              panel actually rendered -- if it did not, the warning is the
+              only place the reader would see it. */}
           <ul style={{ marginTop: 14, paddingLeft: 17 }}>
-            {result.notes.map((note, i) => (
+            {result.notes
+              .filter((note) => !(marginPanelShown && isMarginNote(note)))
+              .map((note, i) => (
               <li
                 key={i}
                 style={{ fontSize: 11.5, color: "var(--ink-dim)", lineHeight: 1.6, marginTop: 6 }}
