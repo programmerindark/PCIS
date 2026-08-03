@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 export default function Modal({
   title,
@@ -13,6 +14,9 @@ export default function Modal({
   onClose: () => void;
   children: React.ReactNode;
 }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -23,7 +27,21 @@ export default function Modal({
     };
   }, [onClose]);
 
-  return (
+  // Rendered into <body>, NOT in place.
+  //
+  // `.page` carries z-index: 1 and `.appbar` is its SIBLING at z-index: 30,
+  // so a modal rendered inside .page is trapped in that stacking context --
+  // its own z-index: 100 is compared only against other children of .page,
+  // and the whole subtree still paints below the appbar. The result was the
+  // sticky header sitting on top of an opened chart, hiding its title and
+  // the first inch of the graph.
+  //
+  // A portal puts the overlay outside .page entirely, where z-index: 100
+  // means what it says. Mounted-check because document does not exist
+  // during server rendering.
+  if (!mounted) return null;
+
+  return createPortal(
     <div className="modal-back" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
@@ -35,6 +53,7 @@ export default function Modal({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

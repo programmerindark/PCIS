@@ -741,6 +741,47 @@ export default function DashboardPage() {
               <span>Density: <b>{density ? density.toFixed(1) : "—"} birds/m²</b></span>
             </div>
 
+            {/* Sensor + engine freshness, at the TOP.
+                
+                This was originally placed above the stat strip further down
+                the page, which put it below the fold -- a staleness warning
+                nobody scrolls to is not a warning. It belongs with the
+                first thing read, because every figure underneath depends on
+                whether these two are current.
+                
+                Two separate clocks on purpose: the reading and the engine
+                run can go stale independently, and knowing WHICH stopped is
+                most of the diagnosis. A pipeline that looked healthy while
+                writing nothing for two and a half days is what taught us
+                that. */}
+            <div
+              style={{
+                display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+                marginTop: 10, fontSize: 12, color: "var(--ink-muted)",
+              }}
+              title={resultAt ? `Engine last ran ${resultAt.toLocaleTimeString()}` : "No engine result yet"}
+            >
+              <span style={{ color: freshness.color, fontWeight: 600 }}>
+                <span style={{ fontSize: 13 }}>{freshness.dot}</span> {freshness.label}
+              </span>
+              {computing && <span className="muted">· refreshing…</span>}
+              <span className="muted">·</span>
+              <span
+                style={{
+                  color:
+                    sensorAgeMin == null ? "var(--ink-dim)"
+                    : sensorAgeMin < 2 ? "var(--ok)"
+                    : sensorAgeMin < 15 ? "var(--ink-muted)"
+                    : "var(--warn)",
+                }}
+              >
+                sensor{" "}
+                {sensorAgeMin == null ? "—"
+                  : sensorAgeMin < 2 ? "live"
+                  : formatAge(sensorAgeMin)}
+              </span>
+            </div>
+
             {showConditions && (
               <div className="tile" style={{ marginTop: 14 }}>
                 <div className="cap">
@@ -844,36 +885,6 @@ export default function DashboardPage() {
               targetTempC={result?.comfort.target_temp_c ?? null}
             />
           </div>
-
-            {/* Freshness of everything below.
-                
-                One badge for the whole strip rather than one per tile: all
-                these figures come from the SAME engine run, so per-tile
-                stamps would repeat one fact nine times and imply the tiles
-                could disagree. What differs between them is CONFIDENCE, and
-                that is already shown per metric in the detail panels. */}
-            <div
-              style={{
-                display: "flex", alignItems: "center", gap: 8,
-                marginTop: 14, fontSize: 11.5, color: "var(--ink-muted)",
-              }}
-              title={
-                resultAt
-                  ? `Engine last ran ${resultAt.toLocaleTimeString()}`
-                  : "No engine result yet"
-              }
-            >
-              <span style={{ color: freshness.color, fontSize: 13, lineHeight: 1 }}>
-                {freshness.dot}
-              </span>
-              <span style={{ color: freshness.color, fontWeight: 600 }}>{freshness.label}</span>
-              {computing && <span className="muted">· refreshing…</span>}
-              {sensorAgeMin != null && (
-                <span className="muted" style={{ marginLeft: "auto" }}>
-                  sensor {sensorAgeMin < 2 ? "live" : `${formatAge(sensorAgeMin)}`}
-                </span>
-              )}
-            </div>
 
             {/* stat strip */}
             <div className="stats">

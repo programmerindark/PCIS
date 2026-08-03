@@ -159,7 +159,7 @@ export default function GCCard({
             No feed or weight recorded yet. The contract prices on corrected FCR,
             which needs both — and nothing on the farm measures them.
           </div>
-          <button
+          <button className="ghost-btn"
             onClick={() => setEditing(true)}
             style={{ marginTop: 10, maxWidth: 210 }}
           >
@@ -200,7 +200,7 @@ export default function GCCard({
             <button className="primary" onClick={save} disabled={busy} style={{ maxWidth: 90, margin: 0 }}>
               {busy ? "Saving…" : "Save"}
             </button>
-            <button onClick={() => setEditing(false)} style={{ maxWidth: 90, margin: 0 }}>
+            <button className="ghost-btn" onClick={() => setEditing(false)} style={{ maxWidth: 90, margin: 0 }}>
               Cancel
             </button>
           </div>
@@ -303,7 +303,7 @@ export default function GCCard({
           </ul>
 
           {!editing && (
-            <button onClick={() => setEditing(true)} style={{ marginTop: 10, maxWidth: 190 }}>
+            <button className="ghost-btn" onClick={() => setEditing(true)} style={{ marginTop: 10, maxWidth: 190 }}>
               Update feed / weight
             </button>
           )}
@@ -335,7 +335,7 @@ function LiftWeightRow({
         placeholder="total kg"
         style={{ width: 120 }}
       />
-      <button
+      <button className="ghost-btn"
         disabled={busy || !(Number(kg) > 0)}
         onClick={() => onSave(lift.id, Number(kg))}
         style={{ maxWidth: 80, margin: 0 }}
