@@ -1023,7 +1023,25 @@ export default function DashboardPage() {
                   </div>
                 </div>
               )}
-              <div className="tile">
+              {/* Flock Health and Crop value side by side.
+                  
+                  They read as one thought: how many birds are alive, and
+                  what the crop is currently worth. Stacked, the reader has
+                  to scroll between the cause and its consequence.
+                  
+                  auto-fit with a 300px floor rather than a fixed 1fr 1fr:
+                  on a phone this becomes one column without a media query,
+                  and the cards never squeeze below the width their numbers
+                  need. */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+                  gap: 14,
+                  alignItems: "start",
+                }}
+              >
+              <div className="tile" style={{ marginTop: 0 }}>
                 <div className="tile-head"><span style={{ fontWeight: 700 }}>Flock Health</span></div>
                 <div className="qa-grid" style={{ marginTop: 0 }}>
                   <div><div className="k muted" style={{ fontSize: 11 }}>Live birds</div><div style={{ fontWeight: 800, fontSize: 17 }}>{liveCount.toLocaleString()}</div></div>
@@ -1061,12 +1079,7 @@ export default function DashboardPage() {
                   of the ventilation load but never count as mortality.
                 </div>
               </div>
-            </div>
 
-            {/* Placed directly under mortality and lifts because it consumes
-                both: mortality drives the CBW denominator above 5%, and a
-                lift adds delivered birds and kilograms. Seeing the payout
-                next to the figures that move it is the point. */}
             {/* Mortality and expected payout in ONE block.
                 
                 They were two cards, which hid the mechanism that ties them:
@@ -1083,9 +1096,13 @@ export default function DashboardPage() {
               onOpen={() => setModal("cropValue")}
             />
 
-            {/* The feed/weight entry form still lives here, below the
-                summary that consumes it. */}
+              </div>
+
+            {/* The feed/weight entry form stays full width below the pair:
+                it is a form, not a figure, and cramming inputs into half a
+                column is how you get a shed-unreadable layout. */}
             <GCCard flockId={flock.id} birdsAlive={liveCount} />
+            </div>
           </div>
 
           {/* ============ RIGHT RAIL ============ */}

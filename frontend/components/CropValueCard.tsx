@@ -96,7 +96,9 @@ export default function CropValueCard({
     <div
       className="tile"
       onClick={onOpen}
-      style={{ cursor: "pointer", marginTop: 14 }}
+      // No top margin: the parent grid owns the spacing, and a margin
+      // here would add to its gap and misalign the two columns.
+      style={{ cursor: "pointer" }}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onOpen(); }}
