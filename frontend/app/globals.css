@@ -40,11 +40,49 @@ html, body {
   margin: 0; padding: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-    "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  /* IBM Plex, self-hosted via next/font -- see app/layout.tsx for why.
+     The system stack stays as a fallback for the moment before the font
+     loads and for anything that fails to fetch it. */
+  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont,
+    "Segoe UI", system-ui, sans-serif;
   font-size: 14px;
-  letter-spacing: -0.01em;
+  /* Plex is already fairly tight; the old -0.01em was compensating for the
+     system stack and reads cramped here. */
+  letter-spacing: 0;
   -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------------
+   Numbers
+   ---------------------------------------------------------------------
+   Every figure on this dashboard is rewritten once a minute. In a
+   proportional face a "1" is narrower than a "0", so 22.7 -> 23.1 shifts
+   everything after it sideways and the whole row twitches on each refresh.
+   On a screen left open in a shed that reads as instability, which is
+   exactly the wrong impression for an instrument.
+
+   `tabular-nums` fixes digit width; Plex Mono is applied to the largest
+   readouts, where the effect is most visible and where a monospace face
+   also signals "measured value" rather than "prose".
+
+   Applied by CLASS, not globally: body copy and the advisor's sentences
+   should stay proportional, because tabular figures inside a paragraph
+   look like a ransom note. */
+.num,
+.stat .v,
+.metric-val,
+.hero-title,
+.meta-row b,
+table td,
+table th {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* The big readouts: mono as well as tabular. */
+.stat .v,
+.metric-val {
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
@@ -231,7 +269,7 @@ button.primary:disabled { opacity: 0.45; cursor: default; transform: none; box-s
 .metric-top { display: flex; align-items: center; gap: 8px; }
 .metric-icon { font-size: 15px; }
 .metric-label { font-size: 12.5px; color: var(--ink-muted); font-weight: 500; }
-.metric-val { font-size: 30px; font-weight: 700; margin-top: 8px; letter-spacing: -1.1px; line-height: 1; }
+.metric-val { font-size: 30px; font-weight: 700; margin-top: 8px; letter-spacing: -0.02em; line-height: 1; }
 .metric-sub { font-size: 11.5px; margin-top: 4px; }
 .bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.09); margin-top: 10px; overflow: hidden; }
 .bar > i { display: block; height: 100%; border-radius: 3px; transition: width 0.5s ease; }
