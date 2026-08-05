@@ -1,0 +1,95 @@
+# PCIS continuous integration.
+#
+# The project's central claim is that every constant is traceable to a
+# published source and that the arithmetic reproduces real settlements to
+# the rupee. On a public repository that claim is only worth anything if a
+# stranger can watch it being checked, so this runs on every push.
+#
+# Three gates, in order of how badly a failure would matter:
+#
+#   1. the engine test suite -- includes the psychrometrics validated
+#      against an external table, the Aviagen/CIGR citations, and the GC
+#      policy checked against a real settlement
+#   2. the generated slab table is current with the Python it came from,
+#      and the browser copy of the payout formula agrees with the engine
+#   3. the frontend typechecks
+#
+# Gate 2 is the unusual one. `frontend/lib/gcPolicy.ts` is a deliberate
+# second implementation of a MONEY formula, allowed only because it is
+# generated from and cross-checked against `pcis/core/gc_policy.py`. Remove
+# this job and that exception becomes an unguarded duplicate.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  engine:
+    name: Engine tests (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+      - name: Run the engine suite
+        # The Qt desktop GUI suites need a display and are not part of the
+        # web deployment, so they are excluded here rather than pulling an
+        # X server into CI.
+        run: |
+          python -m pytest tests/ -q \
+            --ignore=tests/test_gui.py \
+            --ignore=tests/test_widgets.py \
+            --ignore=tests/test_charts.py \
+            --ignore=tests/test_guided.py \
+            --ignore=tests/test_style.py \
+            --ignore=tests/test_packaging.py
+
+  drift:
+    name: Browser copy matches the engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          cd frontend && npm ci
+      - name: Generated table is current, and the TS agrees with the Python
+        # test_gc_export.py regenerates the slab table and fails if the
+        # committed file differs, then compiles gcPolicy.ts and runs it
+        # against the engine over a grid straddling every slab boundary
+        # and the 5% mortality rule.
+        run: python -m pytest tests/test_gc_export.py -q
+
+  frontend:
+    name: Frontend typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: cd frontend && npm ci
+      - name: tsc --noEmit
+        # Deliberately not `next build`: it needs Supabase env vars that do
+        # not belong in CI, and the typecheck catches what matters here.
+        run: cd frontend && npx tsc --noEmit

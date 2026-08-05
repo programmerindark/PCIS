@@ -61,6 +61,13 @@ const SENSOR_DEAD_MIN = 45;
  * appears at exactly the moment the operator most needs to grasp how
  * stale the data is. Past an hour, minutes stop being a unit anyone
  * converts in their head. */
+/** Maximum tunnel air speed, m/s [SKOV Viper Touch].
+ *
+ * Mirrors MAX_TUNNEL_AIR_SPEED_MPS in pcis/core/skov_reference.py. Used
+ * only to decide whether a what-if row is safe to endorse -- no
+ * calculation depends on it here. */
+const MAX_TUNNEL_AIR_SPEED_MPS = 4.0;
+
 function formatAge(min: number): string {
   if (min < 1) return "just now";
   if (min < 60) return `${Math.round(min)}m ago`;
@@ -884,8 +891,24 @@ export default function DashboardPage() {
                 value={bs?.heat_stress_risk ?? "—"} sub={`Panting ${bs?.panting_index ?? "—"}`}
                 pct={bs?.heat_stress_risk === "High" ? 100 : bs?.heat_stress_risk === "Moderate" ? 60 : 25} onClick={() => setModal("heatStress")} />
               <Metric icon="🌀" label="Fans Running" color={result && result.fans_on > house.installed_fans ? "var(--red)" : "var(--teal)"}
-                value={result ? `${result.fans_on}/${house.installed_fans}` : "—"}
-                sub={`${result?.pads_on ? "Pads ON" : "Pads off"}${result?.heating_needed ? " · Heat ON" : ""}`}
+                // A shortfall used to render as "13/10", which parses as a
+                // fraction and reads like a mistake -- thirteen out of ten.
+                // What it actually means is "you need 13, you own 10", and
+                // that is the single most actionable state on the screen.
+                // So the running count stays honest (you cannot run more
+                // fans than you have) and the gap is named separately.
+                value={
+                  result
+                    ? result.fans_on > house.installed_fans
+                      ? `${house.installed_fans}/${house.installed_fans}`
+                      : `${result.fans_on}/${house.installed_fans}`
+                    : "—"
+                }
+                sub={
+                  result && result.fans_on > house.installed_fans
+                    ? `all on · ${result.fans_on - house.installed_fans} more needed`
+                    : `${result?.pads_on ? "Pads ON" : "Pads off"}${result?.heating_needed ? " · Heat ON" : ""}`
+                }
                 pct={Math.min(100, ((result?.fans_on ?? 0) / Math.max(1, house.installed_fans)) * 100)}
                 spark={series.map((s) => s.fans_on)} onClick={() => setModal("fans")} />
               <Metric icon="📉" label="Mortality" color={mortAssess && !mortAssess.within_target ? "var(--red)" : "var(--orange)"}
@@ -1225,8 +1248,24 @@ export default function DashboardPage() {
                         <td style={{ padding: "5px 0" }}>{o.ceiling_height_m} m</td>
                         <td style={{ textAlign: "right", fontWeight: 600 }}>{o.velocity_mps}</td>
                         <td style={{ textAlign: "right", color: "var(--ink-muted)" }}>{o.velocity_fpm}</td>
-                        <td style={{ textAlign: "right", color: o.meets_tunnel_target ? "var(--green-bright)" : o.windchill_effective ? "var(--orange)" : "var(--ink-dim)" }}>
-                          {o.meets_tunnel_target ? "✓ 3.0" : o.windchill_effective ? "~2.5" : "—"}
+                        {/* A green tick meant "reaches the 3 m/s target",
+                            and was shown even at 6.09 m/s -- an air speed
+                            well above the 4.0 m/s maximum tunnel speed
+                            [SKOV]. Read as an endorsement, it invites
+                            lowering the ceiling to a height that would
+                            over-chill the birds. Anything past the maximum
+                            is now flagged rather than ticked. */}
+                        <td style={{
+                          textAlign: "right",
+                          color: o.velocity_mps > MAX_TUNNEL_AIR_SPEED_MPS
+                            ? "var(--danger)"
+                            : o.meets_tunnel_target ? "var(--green-bright)"
+                            : o.windchill_effective ? "var(--orange)" : "var(--ink-dim)",
+                        }}>
+                          {o.velocity_mps > MAX_TUNNEL_AIR_SPEED_MPS
+                            ? `⚠ over ${MAX_TUNNEL_AIR_SPEED_MPS}`
+                            : o.meets_tunnel_target ? "✓ 3.0"
+                            : o.windchill_effective ? "~2.5" : "—"}
                         </td>
                       </tr>
                     ))}

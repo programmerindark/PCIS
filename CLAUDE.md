@@ -70,9 +70,11 @@ can be recomputed from the stored reading.
   climate maths lives here and nowhere else.**
 - `backend/app/engine_api.py` — the ONLY place the web layer touches the
   engine. Adds no engineering of its own.
-- `frontend/` — Next.js 14 App Router. Root `vercel.json` is stale (points
-  at an old static prototype in `/web`); the live config is
-  `frontend/vercel.json`.
+- `frontend/` — Next.js 14 App Router. The live config is
+  `frontend/vercel.json`; the stale root one and its `/web` prototype have
+  been removed.
+- `supabase/` — schema and migrations. **Order matters and is not implied
+  by the filenames** — see `supabase/README.md`.
 - Branch is **`master`**, not `main`.
 
 Run tests, excluding the Qt desktop GUI suites which need a display:
@@ -80,7 +82,7 @@ Run tests, excluding the Qt desktop GUI suites which need a display:
 ```bash
 python3 -m pytest tests/ -q \
   --ignore=tests/test_gui.py --ignore=tests/test_widgets.py \
-  --ignore=tests/test_gui_flow.py --ignore=tests/test_charts.py \
+  --ignore=tests/test_charts.py \
   --ignore=tests/test_guided.py --ignore=tests/test_style.py \
   --ignore=tests/test_packaging.py
 ```

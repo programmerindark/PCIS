@@ -29,3 +29,19 @@ sample_report.pdf
 .idea/
 .DS_Store
 Thumbs.db
+
+# Secrets.
+#
+# frontend/.gitignore already covers .env*.local, but a self-hoster running
+# the FastAPI service locally will write backend/.env or a root .env with a
+# real Supabase service-role key in it -- a key that bypasses every RLS
+# policy in the database. Nothing was covering those paths.
+#
+# Negated last so the committed *.example templates still ship.
+.env
+.env.*
+*/.env
+*/.env.*
+!.env.example
+!*/.env.example
+!*.env.local.example
