@@ -1,0 +1,34 @@
+# Exactly what the non-GUI test suite imports. Nothing more.
+#
+# Why this file exists rather than using requirements.txt: that one pulls
+# PySide6, a full Qt toolkit of a few hundred megabytes, needed only by the
+# desktop GUI suites which CI excludes because they require a display.
+# Installing it to run tests that never import it wastes minutes on every
+# push.
+#
+# Why it exists rather than just `pip install pytest`: that was the first
+# attempt, and it passed locally while failing in CI. The local sandbox
+# already had these installed, so the command looked verified when it was
+# only untested. Three suites failed to collect -- test_db (SQLAlchemy),
+# test_ecowitt_placement (httpx, via backend.app.ecowitt) and
+# test_pdf_report (reportlab). Listing dependencies explicitly is what
+# makes "it passes on my machine" mean something.
+#
+# The ENGINE itself (pcis/core, pcis/equipment) is pure standard library.
+# Every entry below is pulled in by a TEST or by the web layer, never by
+# the climate maths.
+
+pytest>=7.4
+
+# tests/test_db.py -- the desktop app's local recommendation store
+SQLAlchemy>=2.0
+
+# tests/test_pdf_report.py -- generates a crop report and reads it back
+reportlab>=4.0
+pypdf>=4.0
+
+# backend/app/* -- imported by tests/test_ecowitt_placement.py and by the
+# endpoint check in tests/test_gc_policy.py
+fastapi>=0.110
+pydantic>=2.6
+httpx>=0.27

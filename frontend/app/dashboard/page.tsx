@@ -875,10 +875,24 @@ export default function DashboardPage() {
                   refusing to let the reader act on the number PCIS is least
                   able to stand behind. Both are still shown. */}
               <Metric icon="💚" label="Bird Comfort" color="var(--green)"
+                // Marked as judgment, the same way entered values are
+                // marked by hand.
+                //
+                // comfort_engine.py says it plainly in its own docstring:
+                // the composite is PCIS's own synthesis, not a published or
+                // validated instrument, and the scoring constants are
+                // engineering judgment rather than literature values. The
+                // module was honest and the screen was not -- it rendered
+                // that number as the largest thing on the dashboard with
+                // nothing to say it is unlike every cited figure beside it.
+                //
+                // The project's governing rule is that a value is either
+                // traceable to a source or LABELLED as judgment. This one is
+                // judgment, so it says so.
                 value={comfortHeadline != null ? `${comfortHeadline}%` : "—"}
                 sub={result?.felt_comfort_index != null
-                  ? `${bs?.comfort_score ?? "—"}% dry-bulb · ${result.felt_comfort_index}% as felt`
-                  : (bs?.comfort_label ?? "")}
+                  ? `⚖ judgment · ${bs?.comfort_score ?? "—"}% dry-bulb · ${result.felt_comfort_index}% as felt`
+                  : (bs?.comfort_label ? `⚖ judgment · ${bs.comfort_label}` : "⚖ judgment")}
                 pct={comfortHeadline ?? 0} onClick={() => setModal("comfort")} />
               <Metric icon="🌡" label="Feel Temperature" color="var(--blue)"
                 value={result?.effective_temp_c != null ? `${result.effective_temp_c.toFixed(1)}°` : "—"}
@@ -1549,6 +1563,26 @@ export default function DashboardPage() {
 
       {modal === "comfort" && result && (
         <Modal title="Bird Comfort" subtitle="How the score is built, and what it does not include" onClose={() => setModal(null)}>
+          {/* The card carries a "judgment" badge; a badge with no
+              explanation behind it just raises a question. This is the
+              answer, in the words the engine uses about itself. */}
+          <div
+            style={{
+              marginBottom: 16, padding: 12, borderRadius: 12,
+              border: "1px solid rgba(251,146,60,0.35)",
+              background: "rgba(251,146,60,0.07)",
+              fontSize: 12.5, lineHeight: 1.6,
+            }}
+          >
+            <b>⚖ This score is engineering judgment, not a cited value.</b> Its two
+            inputs are published — deviation from the Aviagen target temperature, and
+            THI (Tao &amp; Xin 2003) — but the 0–100 scale that combines them is PCIS&apos;s
+            own synthesis. The penalty constants were chosen, not measured, and nothing
+            has yet checked them against real bird behaviour or performance.
+            <br /><br />
+            Trust the two figures below it over the percentage. THI stays valid at this
+            house&apos;s humidity where the target-temperature table does not.
+          </div>
           <div className="stats">
             <div className="stat"><div className="k">Comfort score</div><div className="v">{bs?.comfort_score ?? "—"}<span className="u">%</span></div><div className="u" style={{ fontSize: 10.5 }}>{bs?.comfort_label ?? ""}</div></div>
             <div className="stat"><div className="k">THI</div><div className="v">{result.comfort.thi}</div><div className="u" style={{ fontSize: 10.5 }}>{result.comfort.thi_class.replace(/_/g, " ")}</div></div>

@@ -134,6 +134,17 @@ Scope is checked on the **PLACEMENT** date, not the lift. B95625 was
 eight days before it opens. A lift-date check waves the wrong entity
 straight through; only `policy_covers(placement_date)` catches it.
 
+**An empty shed keeps logging, and that is fine ONLY because it is
+labelled.** After a lift the sensor carries on writing ~1,440 rows a day
+into an empty building. `readings.flock_id` is stamped at insert from the
+active flock, so NULL means "no birds". That data is worth keeping — with
+zero bird load it is the only chance to observe the envelope alone and
+check the heat balance against a known-zero sensible/latent term — but
+unlabelled it is indistinguishable from occupied data and silently
+contaminates the next crop's analysis. Recommendations already stop when a
+flock ends (`farms_with_ecowitt_keys` filters on `active`); measurements
+deliberately do not.
+
 **Shortage is not mortality either.** Settlements carry short-supplied
 birds on their own line. Computing deaths as `housed - lifted` swallows
 them: lot B95625's 55 short birds read as 8.884% against the slip's 8.635%.
